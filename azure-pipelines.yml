@@ -1,0 +1,42 @@
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+name: "CI"
+
+trigger:
+- master
+- feature/*
+- bug/*
+- test/*
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+jobs:
+- job: Build
+  strategy:
+    matrix:
+      emacs_26.3:
+        emacs_version: "26.3-travis-linux-xenial"
+      emacs_27.1:
+        emacs_version: "27.1-travis-linux-xenial"
+      emacs_snapshot:
+        emacs_version: "git-snapshot-travis-linux-xenial"
+
+  steps:
+  - checkout: self
+    fetchDepth: 1
+
+  - script: |
+      export PATH="~/.evm/bin:$PATH"
+      git clone https://github.com/rejeep/evm.git ~/.evm --depth=1
+      evm config path /tmp
+      evm install emacs-$(emacs_version) --use --skip
+      emacs --version
+    displayName: 'Prepare EVM'
+
+  - script: |
+      export PATH="~/.evm/bin:$PATH"
+      emacs -Q -batch -L . -L ./test -l test/test-utils.el -f ert-run-tests-batch-and-exit
+      # make test
+    displayName: 'Run test'
