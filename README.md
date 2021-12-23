@@ -1,8 +1,11 @@
 Code search integration for `Emacs`
 =================================
 
-`research.el` is an `Emacs`'s plugin that can be used for code searching on `Azure DevOps`'s repo.
-`Github` and other forges integration are now under development.
+`research.el` is an `Emacs`'s plugin that can be used for code searching on `Azure DevOps` and `GitHub` repo.
+Support for other forges integration are now under development.
+
+### News
+- 12/23/2021: Add support for `GitHub` code search
 
 # How to install
 Via [`Quelpa`](https://github.com/quelpa/quelpa)
@@ -70,9 +73,13 @@ Return at most MAX-RESULT items.")
 
 (cl-defgeneric research--load-file ((file research--code-result))
   "Load the remote FILE.")
+
+;; utilities.
+(cl-defgeneric research--buffer-position-url (code-result line)
+  "Return the current buffer file url with LINE information included.")
 ```
 
-It also contains a few structs that can be used to store the return data from them.
+It also contains few structs that can be used to store the return data from them.
 
 ``` emacs-lisp
 (cl-defstruct research--rcp
