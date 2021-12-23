@@ -97,25 +97,6 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
       (insert (format "%s\n" msg))
       (if popup? (pop-to-buffer (current-buffer))))))
 
-(defvar-local research--skip-calc-pos? nil)
-(defun research--true-pos (pos)
-  "Return correct posistion of hit info offset POS."
-  (if buffer-file-name
-      (if research--skip-calc-pos?
-          (+ pos 1)
-        (let ((name buffer-file-name)
-              (inhibit-eol-conversion t)
-              (r-count 0)
-              (pos (max pos (point-min))))
-          (with-temp-buffer
-            (insert-file-contents name)
-            (save-match-data
-              (goto-char (point-min))
-              (while (re-search-forward "\r" pos t)
-                (cl-incf r-count)))
-            (- pos r-count -1))))
-    (+ (filepos-to-bufferpos pos) 1)))
-
 (defun research--restore (file)
   "Restore saved objected from FILE."
   (when (file-exists-p file)
@@ -161,7 +142,9 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                     :host host
                     :forge forge
                     :callback (lambda (result &rest _) (aio-resolve promise (-const result)))
-                    :errorback (lambda (err &rest _) (error "Got error: %s" err)))
+                    :errorback (lambda (err &rest _)
+                                 (message "%s::%s" (propertize "Research" 'face 'error) err)
+                                 (aio-resolve promise (-const nil))))
       (aio-await promise))))
 
 (aio-defun research--shell (command)
@@ -184,9 +167,12 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
   (org)
   (repo))
 
-(cl-defstruct (research--az-rcp (:constructor research--az-rcp-create)
+(cl-defstruct (research--az-rcp (:constructor research--az-rcp-new)
                                 (:include research--rcp))
   (project))
+
+(cl-defstruct (research--gh-rcp (:constructor research--gh-rcp-new)
+                                (:include research--rcp)))
 
 (cl-defstruct research--repo
   "Base type for the repository that we search on."
@@ -196,15 +182,20 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
   (root nil :document "The path to repo's code.")
   (skip-calc-pos 'none))
 
-(cl-defstruct (research--az-repo (:constructor research--az-repo-create)
+(cl-defstruct (research--az-repo (:constructor research--az-repo-new)
                                  (:include research--repo))
   (branch))
+
+(cl-defstruct (research--gh-repo (:constructor research--gh-repo-new)
+                                 (:include research--repo)))
 
 (eval-and-compile
   (research-destruct research--rcp
                      research--az-rcp
+                     research--gh-rcp
                      research--repo
-                     research--az-repo))
+                     research--az-repo
+                     research--gh-repo))
 
 (defvar research--rcps nil
   "Repo's recipres.")
@@ -226,12 +217,29 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                                       :forge 'azdev)))
             ((&plist :id :indexedBranches indexed-branches) col))
       (mapcar (-lambda ((&plist :name))
-                (research--az-repo-create
+                (research--az-repo-new
                  :name (format "%s/%s/%s/%s" org project repo name)
                  :id id
                  :rcp repo-rcp
                  :branch name))
               indexed-branches))))
+
+(cl-defmethod research--get-collections ((repo-rcp research--gh-rcp))
+  (aio-with-async
+    (-let* (((&research--gh-rcp :org :repo) repo-rcp)
+            (col (aio-await
+                  (research--request "GET" "/search/repositories"
+                                     :headers '(("Accept" . "application/vnd.github.v3+json"))
+                                     :query `((q . ,(format "repo:%s/%s" org repo)))
+                                     :host "api.github.com"
+                                     :forge 'github)))
+            ((&plist :items) col))
+      (mapcar (-lambda ((&plist :id))
+                (research--gh-repo-new
+                 :name (format "%s/%s" org repo)
+                 :id id
+                 :rcp repo-rcp))
+              items))))
 
 (defvar research--inuse-collections nil)
 
@@ -293,15 +301,23 @@ into query list target."
 (cl-defmethod research--add-repo ((_type (eql 'azdev)))
   (aio-with-async
     (aio-await (research--add-recipe
-                (research--az-rcp-create
+                (research--az-rcp-new
                  :org (research--comp-read "Org: " nil :history 'research--repo-orgs)
                  :project (research--comp-read "Project: " nil :history 'research--repo-projects)
+                 :repo (research--comp-read "Repository: " nil))))))
+
+(cl-defmethod research--add-repo ((_type (eql 'github)))
+  (aio-with-async
+    (aio-await (research--add-recipe
+                (research--gh-rcp-new
+                 :org (research--comp-read "Org: " nil :history 'research--repo-orgs)
                  :repo (research--comp-read "Repository: " nil))))))
 
 ;;;###autoload
 (defun research-add-repo (type)
   "Add a repository into search collections."
-  (interactive (list (research--comp-read "Type: " `(("Azure DevOps" . azdev))
+  (interactive (list (research--comp-read "Type: " `(("Azure DevOps"    . azdev)
+                                                     ("GitHub"          . github))
                                           :require-match t)))
   (research--add-repo type))
 
@@ -325,14 +341,18 @@ into query list target."
   (repo nil)
   (matches nil :type list :document "List of offsets"))
 
-(cl-defstruct (research--az-code-result (:constructor research--az-code-result-create)
+(cl-defstruct (research--az-code-result (:constructor research--az-code-result-new)
                                         (:include research--code-result))
   (content-id nil)
   (type nil))
 
+(cl-defstruct (research--gh-code-result (:constructor research--gh-code-result-new)
+                                        (:include research--code-result)))
+
 (eval-and-compile
   (research-destruct research--code-result
-                     research--az-code-result))
+                     research--az-code-result
+                     research--gh-code-result))
 
 (defun research--az-get-info (info)
   "Return info description of INFO code."
@@ -383,24 +403,67 @@ Return at most MAX-RESULT items.")
                              :host (format "almsearch.dev.azure.com/%s" org)
                              :forge 'azdev)))
             ((&plist :results :infoCode info) res)
-            (files (mapcar (lambda (re)
-                             (research--az-code-result-create
-                              :path (plist-get re :path)
+            (files (mapcar (-lambda ((&plist :path :versions
+                                             :contentId content-id
+                                             :matches :repository))
+                             (research--az-code-result-new
+                              :path path
                               :url (format "https://dev.azure.com/%s/%s/_git/%s?path=%s&version=GB%s"
                                            org project id
-                                           (url-encode-url (plist-get re :path))
+                                           (url-encode-url path)
                                            (url-encode-url branch))
-                              :id (-> re (plist-get :versions) (elt 0) (plist-get :changeId))
-                              :content-id (plist-get re :contentId)
+                              :id (-> versions (elt 0) (plist-get :changeId))
+                              :content-id content-id
                               :repo collection
                               :matches (mapcar (-rpartial #'plist-get :charOffset)
-                                               (-> re
-                                                   (plist-get :matches)
-                                                   (plist-get :content)))
-                              :type (-> re (plist-get :repository) (plist-get :type))))
+                                               (plist-get matches :content))
+                              :type (plist-get repository :type)))
                            results)))
       (research--show-info info)
       files)))
+
+(cl-defstruct (research--frag-pos (:constructor research--frag-pos-new))
+  (fragment nil :type string)
+  (offset nil :type number))
+
+(eval-and-compile
+  (research-destruct research--frag-pos))
+
+(cl-defmethod research--query ((collection research--gh-repo) query page max-result)
+  (aio-with-async
+    (-let* (((&research--gh-repo
+              :id repo-id
+              :rcp (&research--gh-rcp :org :repo))
+             collection)
+            (res (aio-await (research--request
+                             "GET" "/search/code"
+                             :headers '(("Accept" . "application/vnd.github.v3.text-match+json"))
+                             :query `((q . ,(format "repo:%s/%s %s" org repo query))
+                                      (per_page . ,max-result)
+                                      (page . ,page))
+                             :host "api.github.com"
+                             :forge 'github)))
+            ((&plist :items) res))
+      (--remove (not it)
+                (mapcar
+                 (-lambda ((&plist :path :sha :html_url url
+                                   :repository (&plist :id cur-id)
+                                   :text_matches matches))
+                   (when (equal repo-id cur-id)
+                     (research--gh-code-result-new
+                      :path path
+                      :url url
+                      :id sha
+                      :repo collection
+                      :matches (apply #'nconc
+                                      (mapcar (-lambda ((&plist :fragment :matches))
+                                                (mapcar (-lambda ((&plist :indices [start _]))
+                                                          (research--frag-pos-new
+                                                           :fragment fragment
+                                                           :offset start))
+                                                        matches))
+                                              matches)))))
+                 items)))))
 
 ;;;###autoload
 (cl-defun research-query (&key query page prefix hint)
@@ -450,6 +513,44 @@ The HINT will be used when there's no query specified."
                     "%s%s"
                     (propertize "Info: " 'face 'warning)
                     msg)))))
+
+(cl-defgeneric research--buf-pos (pos)
+  "Calculate the position in current buffer from POS.")
+
+(defvar-local research--skip-calc-pos? nil)
+(cl-defmethod research--buf-pos ((pos number))
+  (if buffer-file-name
+      (if research--skip-calc-pos?
+          (+ pos 1)
+        (let ((name buffer-file-name)
+              (inhibit-eol-conversion t)
+              (r-count 0)
+              (pos (max pos (point-min))))
+          (with-temp-buffer
+            (insert-file-contents name)
+            (save-match-data
+              (goto-char (point-min))
+              (while (search-forward "\r" pos 'bound)
+                (cl-incf r-count)))
+            (- pos r-count -1))))
+    (+ (filepos-to-bufferpos pos) 1)))
+
+(cl-defmethod research--buf-pos ((pos research--frag-pos))
+  (-let* (((&research--frag-pos :fragment :offset) pos)
+          (r-count 0)
+          (offset (with-temp-buffer
+                    (set-buffer-multibyte nil)
+                    (set-buffer-file-coding-system 'no-conversion)
+                    (insert fragment)
+                    (save-match-data
+                      (goto-char (point-min))
+                      (while (search-forward "\r" offset 'bound)
+                        (cl-incf r-count)))
+                    (- offset r-count))))
+    (goto-char (point-min))
+    (search-forward (decode-coding-string fragment 'utf-8-dos 'nocopy) nil 'noerror)
+    (when-let ((m (match-beginning 0)))
+      (+ m offset))))
 
 (defvar-local research--current-buffer-result nil
   "Store reSearch result of current buffer.
@@ -598,6 +699,19 @@ It's a plist of (:re research--code-result :idx :skip-calc-pos).")
                          :forge 'azdev))
              (plist-get :value)))))))
 
+(cl-defmethod research--load-file ((file research--gh-code-result))
+  (aio-with-async
+    (-let [(&research--gh-code-result
+            :id
+            :repo (&research--gh-repo :id repo-id))
+           file]
+      (-> (aio-await (research--request
+                      "GET" (format "/repositories/%s/git/blobs/%s" repo-id id)
+                      :host "api.github.com"
+                      :forge 'github))
+          (plist-get :content)
+          (base64-decode-string)))))
+
 (aio-defun research--load-file-1 (file &optional force)
   "Load the remote FILE.
 Optionally open ignore cache with FORCE."
@@ -620,8 +734,11 @@ Optionally open ignore cache with FORCE."
         (with-current-buffer (find-file-noselect file-name)
           (unless (not (eq (point-min) (point-max)))
             (setq buffer-read-only nil)
-            (insert file-content)
+            ;; Need to convert to unibyte and no-conversion to insert binary data
             (let ((coding-system-for-write 'no-conversion))
+              (set-buffer-multibyte nil)
+              (set-buffer-file-coding-system 'no-conversion)
+              (insert file-content)
               (save-buffer))
             (let ((coding-system-for-read 'utf-8-dos))
               (revert-buffer t t))
@@ -669,7 +786,7 @@ Optionally open ignore cache with FORCE."
   "In buffer BUFFER, jump to true position of RAW-POS."
   (switch-to-buffer buffer)
   (let* ((raw-pos (if (stringp raw-pos) (string-to-number raw-pos) raw-pos))
-         (pos (if (< raw-pos (point-min)) (point) (research--true-pos raw-pos))))
+         (pos (if (equal raw-pos 0) (point-min) (research--buf-pos raw-pos))))
     (goto-char pos)
     (recenter)
     (when research-pulse-at-cursor
@@ -706,10 +823,16 @@ Optionally open ignore cache with FORCE."
 
 ;;; Utilities commands
 
-(defsubst research--buffer-position-url (line)
-  "Return the position part of current buffer file url at LINE."
-  (format "&line=%1$s&lineEnd=%1$s&lineStartColumn=1&lineEndColumn=1"
+(cl-defgeneric research--buffer-position-url (code-result line)
+  "Return the current buffer file url with LINE information included.")
+
+(cl-defmethod research--buffer-position-url ((re research--az-code-result) line)
+  (format "%1$s&line=%2$s&lineEnd=%2$s&lineStartColumn=1&lineEndColumn=1"
+          (research--code-result-url re)
           line))
+
+(cl-defmethod research--buffer-position-url ((re research--gh-code-result) line)
+  (format "%s#L%s" (research--code-result-url re) line))
 
 ;;;###autoload
 (defun research-open-buffer-url ()
@@ -718,8 +841,8 @@ Optionally open ignore cache with FORCE."
   (cond
    (research--current-buffer-result
     (browse-url
-     (concat (research--code-result-url (plist-get research--current-buffer-result :re))
-             (research--buffer-position-url (format-mode-line "%l")))))
+     (-> (plist-get research--current-buffer-result :re)
+         (research--buffer-position-url (format-mode-line "%l")))))
    (buffer-file-name
     (aio-with-async
       (-let* ((path (-some->> research--inuse-collections
@@ -736,8 +859,8 @@ Optionally open ignore cache with FORCE."
         (while t
           (aio-await (apply #'research--jump-to-result result))
           (browse-url
-           (concat (research--code-result-url (plist-get research--current-buffer-result :re))
-                   (research--buffer-position-url (format-mode-line "%l"))))
+           (-> (plist-get research--current-buffer-result :re)
+               (research--buffer-position-url (format-mode-line "%l"))))
           (-setq (result) (aio-chain promise))))))
    (t
     (message "No buffer url found! Please open this buffer by reSearch."))))
