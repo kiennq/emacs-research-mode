@@ -73,6 +73,7 @@
 
 (cl-defun research--comp-read (prompt collection
                                       &key
+                                      category
                                       predicate
                                       initial-input
                                       default
@@ -80,9 +81,15 @@
                                       history)
   "`completing-read' thats return `cdr' in case collection is an alist.
 HISTORY is the variable that holds input history.
-PROMPT COLLECTION PREDICATE INITIAL-INPUT DEFAULT REQUIRE-MATCH."
+PROMPT COLLECTION CATEGORY PREDICATE INITIAL-INPUT DEFAULT REQUIRE-MATCH."
   (let* ((collection (delete-dups (append collection (symbol-value history))))
-         (result (completing-read prompt collection
+         (result (completing-read prompt
+                                  (lambda (str pred action)
+                                    (cond
+                                     ((equal action 'metadata)
+                                      `(metadata (category . ,category)))
+                                     (t
+                                      (complete-with-action action collection str pred))))
                                   predicate require-match initial-input
                                   history default)))
     (or (cdr (assoc result collection))
@@ -610,12 +617,8 @@ It's a plist of (:re research--code-result :idx :skip-calc-pos).")
            :buffer "*helm reSearch*"))
          (t
           (let ((re (research--comp-read (format "pattern [%s]: " (car research--query-history))
-                                         (lambda (str pred action)
-                                           (cond
-                                            ((equal action 'metadata)
-                                             `(metadata (category . research)))
-                                            (t
-                                             (complete-with-action action collection str pred))))
+                                         collection
+                                         :category 'research
                                          :require-match t)))
             (funcall action-fn `(,re local))))))
      (--map (cons (research--code-result-path it) it) results)
