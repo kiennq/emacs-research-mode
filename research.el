@@ -218,7 +218,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
             ((&plist :id :indexedBranches indexed-branches) col))
       (mapcar (-lambda ((&plist :name))
                 (research--az-repo-new
-                 :name (format "%s/%s/%s/%s" org project repo name)
+                 :name (format "AzDev/%s/%s/%s/%s" org project repo name)
                  :id id
                  :rcp repo-rcp
                  :branch name))
@@ -236,7 +236,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
             ((&plist :items) col))
       (mapcar (-lambda ((&plist :id))
                 (research--gh-repo-new
-                 :name (format "%s/%s" org repo)
+                 :name (format "GitHub/%s/%s" org repo)
                  :id id
                  :rcp repo-rcp))
               items))))
@@ -269,7 +269,7 @@ into query list target."
                                               (apply #'nconc (mapcar #'aio-wait-for repos)))))))))
         (setq research--inuse-collections
               (append
-               (if (equal option 1) nil research--inuse-collections)
+               (when add-new research--inuse-collections)
                `(,(research--comp-read
                    (format "%s Collection [%s]: "
                            (cond (add-new "Add")
