@@ -109,7 +109,10 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
   (when (file-exists-p file)
     (car (read-from-string
           (let ((coding-system-for-read 'utf-8-dos))
-            (with-current-buffer (find-file-noselect file)
+            (with-temp-buffer
+              (set-buffer-multibyte nil)
+              (setq buffer-file-coding-system 'no-conversion)
+              (insert-file-contents file)
               (buffer-substring-no-properties (point-min) (point-max))))))))
 
 (defun research--save (file obj)
@@ -547,7 +550,7 @@ The HINT will be used when there's no query specified."
           (r-count 0)
           (offset (with-temp-buffer
                     (set-buffer-multibyte nil)
-                    (set-buffer-file-coding-system 'no-conversion)
+                    (setq buffer-file-coding-system 'no-conversion)
                     (insert fragment)
                     (save-match-data
                       (goto-char (point-min))
@@ -740,7 +743,7 @@ Optionally open ignore cache with FORCE."
             ;; Need to convert to unibyte and no-conversion to insert binary data
             (let ((coding-system-for-write 'no-conversion))
               (set-buffer-multibyte nil)
-              (set-buffer-file-coding-system 'no-conversion)
+              (setq buffer-file-coding-system 'no-conversion)
               (insert file-content)
               (save-buffer))
             (let ((coding-system-for-read 'utf-8-dos))
