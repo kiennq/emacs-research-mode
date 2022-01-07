@@ -138,7 +138,8 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 
 ;; TODO: create a class/truct so that we can use method specialization defmethod
 (cl-defun research--request (method resource
-                                    &key query payload headers auth host forge) 
+                                    &key query payload headers reader auth host forge)
+  "Wrapper of `ghub-request' in async form."
   (aio-with-async
     (-let ((promise (aio-promise))
            (ghub-json-object-type 'plist)
@@ -148,6 +149,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                     :query query
                     :payload payload
                     :headers headers
+                    :reader reader
                     :auth (or auth 'token)
                     :host host
                     :forge forge
@@ -684,15 +686,16 @@ It's a plist of (:re research--code-result :idx :skip-calc-pos).")
            file]
       (pcase type
         ("git"
-         (->> (aio-await (research--request
-                          "GET" (format "/%s/_apis/git/repositories/%s/items" project repo)
-                          :query `((api-version . "6.0-preview.1")
-                                   (versionType . "commit")
-                                   (version . ,id)
-                                   (scopePath . ,path))
-                          :host (format "dev.azure.com/%s" org)
-                          :forge 'azdev))
-              (alist-get 'message)))
+         (aio-await (research--request
+                     "GET" (format "/%s/_apis/git/repositories/%s/items" project repo)
+                     :query `((api-version . "6.0-preview.1")
+                              (versionType . "commit")
+                              (version . ,id)
+                              (scopePath . ,path))
+                     :reader (lambda (&rest _) (buffer-substring-no-properties
+                                                (point) (point-max)))
+                     :host (format "dev.azure.com/%s" org)
+                     :forge 'azdev)))
         ("custom"
          (-> (aio-await (research--request
                          "GET" "/_apis/search/customCode"
@@ -738,17 +741,17 @@ Optionally open ignore cache with FORCE."
       (let ((file-content (aio-await (research--load-file file))))
         (make-directory (file-name-directory file-name) t)
         (with-current-buffer (find-file-noselect file-name)
-          (unless (not (eq (point-min) (point-max)))
-            (setq buffer-read-only nil)
-            ;; Need to convert to unibyte and no-conversion to insert binary data
-            (let ((coding-system-for-write 'no-conversion))
-              (set-buffer-multibyte nil)
-              (setq buffer-file-coding-system 'no-conversion)
-              (insert file-content)
-              (save-buffer))
-            (let ((coding-system-for-read 'utf-8-dos))
-              (revert-buffer t t))
-            (setq buffer-read-only t))
+          (setq buffer-read-only nil)
+          (erase-buffer)
+          ;; Need to convert to unibyte and no-conversion to insert binary data
+          (let ((coding-system-for-write 'no-conversion))
+            (set-buffer-multibyte nil)
+            (setq buffer-file-coding-system 'no-conversion)
+            (insert file-content)
+            (save-buffer))
+          (let ((coding-system-for-read 'utf-8-dos))
+            (revert-buffer t t))
+          (setq buffer-read-only t)
           (current-buffer))))))
 
 (aio-defun research--get-git-toplevel ()
