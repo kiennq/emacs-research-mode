@@ -108,7 +108,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
   "Restore saved objected from FILE."
   (when (file-exists-p file)
     (car (read-from-string
-          (let ((coding-system-for-read 'utf-8-dos))
+          (let ((coding-system-for-read 'utf-8-auto-dos))
             (with-temp-buffer
               (set-buffer-multibyte nil)
               (setq buffer-file-coding-system 'no-conversion)
@@ -560,7 +560,7 @@ The HINT will be used when there's no query specified."
                         (cl-incf r-count)))
                     (- offset r-count))))
     (goto-char (point-min))
-    (search-forward (decode-coding-string fragment 'utf-8-dos 'nocopy) nil 'noerror)
+    (search-forward (decode-coding-string fragment 'utf-8-auto-dos 'nocopy) nil 'noerror)
     (when-let ((m (match-beginning 0)))
       (+ m offset))))
 
@@ -749,7 +749,7 @@ Optionally open ignore cache with FORCE."
             (setq buffer-file-coding-system 'no-conversion)
             (insert file-content)
             (save-buffer))
-          (let ((coding-system-for-read 'utf-8-dos))
+          (let ((coding-system-for-read 'utf-8-auto-dos))
             (revert-buffer t t))
           (setq buffer-read-only t)
           (current-buffer))))))
