@@ -222,7 +222,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 (defvar research--collections nil
   "List of cached `research--repo'.")
 
-(cl-defgeneric research--get-collections ((repo-rcp research--rcp))
+(cl-defgeneric research--get-collections (repo-rcp)
   "Get collections of REPO-RCP.")
 
 (cl-defmethod research--get-collections ((repo-rcp research--az-rcp))
@@ -400,7 +400,7 @@ into query list target."
     (35 "Substring search queries (double wildcard) with '?' or a combination of '?' and '*' like *abc? , ?abc? , ?abc* is not supported. You can try using '*' instead of '?'")
     (_ (format "Unexpected info code of `%s'. Search directly on ADO might reveal the issue." info))))
 
-(cl-defgeneric research--query ((repo research--repo) query page max-result)
+(cl-defgeneric research--query (repo query page max-result)
   "Query QUERY to repository REPO with page PAGE.
 Return at most MAX-RESULT items.")
 
@@ -682,7 +682,7 @@ It's a plist of (:re research--code-result :idx :skip-calc-pos).")
     (let* ((buffer-file-name (or file-name (buffer-name))))
       (set-auto-mode t))))
 
-(cl-defgeneric research--load-file ((file research--code-result))
+(cl-defgeneric research--load-file (file)
   "Load the remote FILE.")
 
 (cl-defmethod research--load-file ((file research--az-code-result))
