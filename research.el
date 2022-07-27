@@ -154,8 +154,15 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                     :host host
                     :forge forge
                     :callback (lambda (result &rest _) (aio-resolve promise (-const result)))
-                    :errorback (lambda (err &rest _)
-                                 (message "%s::%s" (propertize "Research" 'face 'error) err)
+                    :errorback (lambda (err _header _status req &rest _)
+                                 (message "%s::%s" (propertize "Research" 'face 'error)
+                                          (pcase-let ((`(,_symb . ,data) err))
+                                            (if (eq (car-safe data) 'http)
+                                                (let ((code (car (cdr-safe data))))
+                                                  (list 'http-error code
+                                                        (nth 2 (assq code url-http-codes))
+                                                        (and req (url-filename (ghub--req-url req)))))
+                                              err)))
                                  (aio-resolve promise (-const nil))))
       (aio-await promise))))
 
