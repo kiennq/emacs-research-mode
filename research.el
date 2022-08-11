@@ -199,7 +199,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
   (id)
   (rcp nil :read-only t)
   (root nil :document "The path to repo's code.")
-  (skip-calc-pos 'none))
+  (skip-calc-pos t))
 
 (cl-defstruct (research--az-repo (:constructor research--az-repo-new)
                                  (:include research--repo))
@@ -240,6 +240,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                  :name (format "AzDev/%s/%s/%s/%s" org project repo name)
                  :id id
                  :rcp repo-rcp
+                 :skip-calc-pos 'none
                  :branch name))
               indexed-branches))))
 
