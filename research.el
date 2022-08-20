@@ -23,6 +23,7 @@
 (require 'pulse)
 (require 'dash)
 (require 'ghub)
+(require 'plstore)
 (eval-when-compile
   (require 'subr-x))
 
@@ -36,31 +37,37 @@
   :group 'research
   :type 'boolean)
 
-(defcustom research-recipes-file (expand-file-name ".cache/research/recipes"
-                                                   user-emacs-directory)
+(defconst research--cache-path (expand-file-name ".cache/research"
+                                                 user-emacs-directory)
+  "Path to store research's cache files.")
+
+(defcustom research-recipes-file (expand-file-name "recipes" research--cache-path)
   "File to save the repo's recipes."
   :group 'research
-  :type 'directory)
+  :type 'file)
 
-(defcustom research-repos-file (expand-file-name ".cache/research/repos"
-                                                 user-emacs-directory)
+(defcustom research-repos-file (expand-file-name "repos" research--cache-path)
   "File to cache the available repos."
   :group 'research
-  :type 'directory)
+  :type 'file)
 
 (defvar research-debug nil "Enable debug mode.")
 (defvar research--conn nil "ReSearchCLI jsonrpc connection.")
+
+(defconst research--auths-file (expand-file-name "auths" research--cache-path))
 
 (defconst research--helm-featurep (require 'helm nil 'noerror))
 (defconst research--ivy-featurep (require 'ivy nil 'noerror))
 
 (declare-function evil-set-command-property "ext:evil-common")
 
+;; AzureDevOps
 (cl-defmethod ghub--username (_host (_forge (eql 'azdev)))
   ""
   "azdev")
 
 (cl-defmethod ghub--auth (host auth username (forge (eql 'azdev)))
+  "Authentication header for AzDev."
   (unless username
     (setq username (ghub--username host forge)))
   (if (eq auth 'basic)
@@ -70,6 +77,32 @@
                   (base64-encode-string
                    (concat ":" (ghub--token host username auth nil forge))
                    t)))))
+
+;; GitHub Codesearch
+(defvar research--auths nil "`plstore' storage.")
+(cl-defmethod ghub--username (_host (_forge (eql 'cs-github))))
+(cl-defmethod ghub--auth (host (_auth (eql 'cookie)) _user (_forge (eql 'cs-github)))
+  "Authentication header for GitHub Codesearch with HOST."
+  (unless research--auths
+    (setq research--auths (plstore-open research--auths-file)))
+  (list (cons "Cookie"
+              (or (plist-get (cdr (plstore-get research--auths host)) :cookie)
+                  (let (cookie
+                        (url "https://cs.github.com/")
+                        (cookie-name "__Host-blackbird"))
+                    (read-from-minibuffer
+                     "The current cert is not valid. Press ENTER to open GitHub CodeSearch for verification.")
+                    (browse-url url)
+                    (setq cookie
+                          (format "%s=%s"
+                                  cookie-name
+                                  (read-from-minibuffer
+                                   (format "Enter the cookie of `%s' from the opened website: "
+                                           cookie-name))))
+                    (plstore-put research--auths host `(:cookie ,cookie) nil)
+                    (plstore-save research--auths)
+                    cookie)))
+        '("Authorization" . "")))
 
 (cl-defun research--comp-read (prompt collection
                                       &key
@@ -136,6 +169,14 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                      `(,f ,source))))))
          (macroexp-progn))))
 
+(cl-defgeneric research--re-auth-p (host auth forge)
+  "Check if should try to re-authenticate for HOST with AUTH method of FORGE.")
+
+(cl-defmethod research--re-auth-p (host (_auth (eql 'cookie)) (_forge (eql 'cs-github)))
+  "Check if should try to re-authenticate for HOST of GitHub Codesearch."
+  (plstore-delete research--auths host)
+  t)
+
 ;; TODO: create a class/truct so that we can use method specialization defmethod
 (cl-defun research--request (method resource
                                     &key query payload headers reader auth host forge)
@@ -144,6 +185,8 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
     (-let ((promise (aio-promise))
            (ghub-json-object-type 'plist)
            (ghub-json-array-type 'array)
+           (ghub-json-null-object nil)
+           (ghub-json-false-object nil)
            (ghub-json-use-jansson t))
       (ghub-request method resource nil
                     :query query
@@ -154,16 +197,38 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                     :host host
                     :forge forge
                     :callback (lambda (result &rest _) (aio-resolve promise (-const result)))
-                    :errorback (lambda (err _header _status req &rest _)
-                                 (message "%s::%s" (propertize "Research" 'face 'error)
-                                          (pcase-let ((`(,_symb . ,data) err))
-                                            (if (eq (car-safe data) 'http)
-                                                (let ((code (car (cdr-safe data))))
-                                                  (list 'http-error code
-                                                        (nth 2 (assq code url-http-codes))
-                                                        (and req (url-filename (ghub--req-url req)))))
-                                              err)))
-                                 (aio-resolve promise (-const nil))))
+                    :errorback
+                    (lambda (err _header _status req &rest _)
+                      (when-let ((err
+                                  (pcase-let ((`(,_symb . ,data) err))
+                                    (if (eq (car-safe data) 'http)
+                                        (pcase (car (cdr-safe data))
+                                          ((or 401 500)
+                                           (if (research--re-auth-p host auth forge)
+                                               (progn
+                                                 (aio-with-async
+                                                   (aio-resolve
+                                                    promise
+                                                    (-const (aio-await (research--request
+                                                                        method resource
+                                                                        :query query
+                                                                        :payload payload
+                                                                        :headers headers
+                                                                        :reader reader
+                                                                        :auth auth
+                                                                        :host host
+                                                                        :forge forge)))))
+                                                 nil)
+                                             (list 'http-error 401
+                                                   (nth 2 (assq 401 url-http-codes))
+                                                   (when req (url-filename (ghub--req-url req))))))
+                                          (`,code
+                                           (list 'http-error code
+                                                 (nth 2 (assq code url-http-codes))
+                                                 (when req (url-filename (ghub--req-url req))))))
+                                      err))))
+                        (message "%s::%s" (propertize "Research" 'face 'error) err)
+                        (aio-resolve promise (-const nil)))))
       (aio-await promise))))
 
 (aio-defun research--shell (command)
@@ -240,26 +305,42 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                  :name (format "AzDev/%s/%s/%s/%s" org project repo name)
                  :id id
                  :rcp repo-rcp
-                 :skip-calc-pos 'none
+                 :skip-calc-pos 'undefined
                  :branch name))
               indexed-branches))))
 
+;; (cl-defmethod research--get-collections ((repo-rcp research--gh-rcp))
+;;   (aio-with-async
+;;     (-let* (((&research--gh-rcp :org :repo) repo-rcp)
+;;             (col (aio-await
+;;                   (research--request "GET" "/search/repositories"
+;;                                      :headers '(("Accept" . "application/vnd.github.v3+json"))
+;;                                      :query `((q . ,(format "repo:%s/%s" org repo)))
+;;                                      :host "api.github.com"
+;;                                      :forge 'github)))
+;;             ((&plist :items) col))
+;;       (mapcar (-lambda ((&plist :id))
+;;                 (research--gh-repo-new
+;;                  :name (format "GitHub/%s/%s" org repo)
+;;                  :id id
+;;                  :rcp repo-rcp))
+;;               items))))
+
 (cl-defmethod research--get-collections ((repo-rcp research--gh-rcp))
   (aio-with-async
-    (-let* (((&research--gh-rcp :org :repo) repo-rcp)
-            (col (aio-await
-                  (research--request "GET" "/search/repositories"
-                                     :headers '(("Accept" . "application/vnd.github.v3+json"))
-                                     :query `((q . ,(format "repo:%s/%s" org repo)))
-                                     :host "api.github.com"
-                                     :forge 'github)))
-            ((&plist :items) col))
-      (mapcar (-lambda ((&plist :id))
-                (research--gh-repo-new
-                 :name (format "GitHub/%s/%s" org repo)
-                 :id id
-                 :rcp repo-rcp))
-              items))))
+    (-when-let* (((&research--gh-rcp :org :repo) repo-rcp)
+                 (col (aio-await
+                       (research--request "GET" (format "/api/repos/%s/%s" org repo)
+                                          :auth 'cookie
+                                          :host "cs.github.com"
+                                          :forge 'cs-github)))
+                 ((&plist :RepoID id) col))
+      (list
+       (research--gh-repo-new
+        :name (format "GitHub/%s/%s" org repo)
+        :id id
+        :skip-calc-pos 'undefined
+        :rcp repo-rcp)))))
 
 (defvar research--inuse-collections nil)
 
@@ -406,6 +487,7 @@ into query list target."
 Return at most MAX-RESULT items.")
 
 (cl-defmethod research--query ((collection research--az-repo) query page max-result)
+  ""
   (aio-with-async
     (-let* (((&research--az-repo
               :id :branch
@@ -449,41 +531,72 @@ Return at most MAX-RESULT items.")
 (eval-and-compile
   (research-destruct research--frag-pos))
 
-(cl-defmethod research--query ((collection research--gh-repo) query page max-result)
+;; (cl-defmethod research--query ((collection research--gh-repo) query page max-result)
+;;   (aio-with-async
+;;     (-let* (((&research--gh-repo
+;;               :id repo-id
+;;               :rcp (&research--gh-rcp :org :repo))
+;;              collection)
+;;             (res (aio-await (research--request
+;;                              "GET" "/search/code"
+;;                              :headers '(("Accept" . "application/vnd.github.v3.text-match+json"))
+;;                              :query `((q . ,(format "repo:%s/%s %s" org repo query))
+;;                                       (per_page . ,max-result)
+;;                                       (page . ,page))
+;;                              :host "api.github.com"
+;;                              :forge 'github)))
+;;             ((&plist :items) res))
+;;       (--remove (not it)
+;;                 (mapcar
+;;                  (-lambda ((&plist :path :sha :html_url url
+;;                                    :repository (&plist :id cur-id)
+;;                                    :text_matches matches))
+;;                    (when (equal repo-id cur-id)
+;;                      (research--gh-code-result-new
+;;                       :path path
+;;                       :url url
+;;                       :id sha
+;;                       :repo collection
+;;                       :matches (apply #'nconc
+;;                                       (mapcar (-lambda ((&plist :fragment :matches))
+;;                                                 (mapcar (-lambda ((&plist :indices [start _]))
+;;                                                           (research--frag-pos-new
+;;                                                            :fragment fragment
+;;                                                            :offset start))
+;;                                                         matches))
+;;                                               matches)))))
+;;                  items)))))
+
+(cl-defmethod research--query ((collection research--gh-repo) query page _max-result)
+  ""
   (aio-with-async
     (-let* (((&research--gh-repo
               :id repo-id
               :rcp (&research--gh-rcp :org :repo))
              collection)
             (res (aio-await (research--request
-                             "GET" "/search/code"
-                             :headers '(("Accept" . "application/vnd.github.v3.text-match+json"))
-                             :query `((q . ,(format "repo:%s/%s %s" org repo query))
-                                      (per_page . ,max-result)
-                                      (page . ,page))
-                             :host "api.github.com"
-                             :forge 'github)))
-            ((&plist :items) res))
+                             "GET" "/api/search"
+                             :query `((q . ,query)
+                                      (repo . ,(format "%s/%s" org repo))
+                                      (p . ,page))
+                             :auth 'cookie
+                             :host "cs.github.com"
+                             :forge 'cs-github)))
+            ((&plist :results) res))
       (--remove (not it)
                 (mapcar
-                 (-lambda ((&plist :path :sha :html_url url
-                                   :repository (&plist :id cur-id)
-                                   :text_matches matches))
-                   (when (equal repo-id cur-id)
+                 (-lambda ((&plist :path :sha :commit_sha
+                                   :repo_id
+                                   :matches))
+                   (when (equal repo-id repo_id)
                      (research--gh-code-result-new
                       :path path
-                      :url url
+                      :url (format "https://github.com/%s/%s/blob/%s/%s"
+                                   org repo commit_sha path)
                       :id sha
                       :repo collection
-                      :matches (apply #'nconc
-                                      (mapcar (-lambda ((&plist :fragment :matches))
-                                                (mapcar (-lambda ((&plist :indices [start _]))
-                                                          (research--frag-pos-new
-                                                           :fragment fragment
-                                                           :offset start))
-                                                        matches))
-                                              matches)))))
-                 items)))))
+                      :matches (mapcar (-rpartial #'plist-get :start) matches))))
+                 results)))))
 
 ;;;###autoload
 (cl-defun research-query (&key query page prefix hint)
@@ -793,7 +906,7 @@ Optionally open ignore cache with FORCE."
 
 (defun research--get-skip-calc-pos (repo)
   "Ask for skip calculating true position for REPO."
-  (when (equal (research--repo-skip-calc-pos repo) 'none)
+  (when (equal (research--repo-skip-calc-pos repo) 'undefined)
     (setf (research--repo-skip-calc-pos repo)
           (y-or-n-p (format "Skip calculating true position [%s]? "
                                  (research--repo-name repo)))))
