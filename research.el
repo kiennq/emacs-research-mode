@@ -221,11 +221,13 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                                                  nil)
                                              (list 'http-error 401
                                                    (nth 2 (assq 401 url-http-codes))
-                                                   (when req (url-filename (ghub--req-url req))))))
+                                                   (when req (url-filename (ghub--req-url req)))
+                                                   (cl-third data))))
                                           (`,code
                                            (list 'http-error code
                                                  (nth 2 (assq code url-http-codes))
-                                                 (when req (url-filename (ghub--req-url req))))))
+                                                 (when req (url-filename (ghub--req-url req)))
+                                                 (cl-third data))))
                                       err))))
                         (message "%s::%s" (propertize "Research" 'face 'error) err)
                         (aio-resolve promise (-const nil)))))
@@ -835,7 +837,7 @@ It's a plist of (:re research--code-result :idx :skip-calc-pos).")
             :id
             :repo (&research--gh-repo :id repo-id))
            file]
-      (-> (aio-await (research--request
+      (-some-> (aio-await (research--request
                       "GET" (format "/repositories/%s/git/blobs/%s" repo-id id)
                       :host "api.github.com"
                       :forge 'github))
@@ -859,7 +861,7 @@ Optionally open ignore cache with FORCE."
                                   "/" )))
     (if (and (file-exists-p file-name) (not force))
         (find-file-noselect file-name)
-      (let ((file-content (aio-await (research--load-file file))))
+      (when-let ((file-content (aio-await (research--load-file file))))
         (make-directory (file-name-directory file-name) t)
         (with-current-buffer (find-file-noselect file-name)
           (setq buffer-read-only nil)
