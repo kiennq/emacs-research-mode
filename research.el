@@ -169,8 +169,9 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                      `(,f ,source))))))
          (macroexp-progn))))
 
-(cl-defgeneric research--re-auth-p (host auth forge)
-  "Check if should try to re-authenticate for HOST with AUTH method of FORGE.")
+(cl-defgeneric research--re-auth-p (_host _auth _forge)
+  "Check if should try to re-authenticate for HOST with AUTH method of FORGE."
+  nil)
 
 (cl-defmethod research--re-auth-p (host (_auth (eql 'cookie)) (_forge (eql 'cs-github)))
   "Check if should try to re-authenticate for HOST of GitHub Codesearch."
@@ -403,18 +404,35 @@ into query list target."
 
 (cl-defmethod research--add-repo ((_type (eql 'azdev)))
   (aio-with-async
-    (aio-await (research--add-recipe
-                (research--az-rcp-new
-                 :org (research--comp-read "Org: " nil :history 'research--repo-orgs)
-                 :project (research--comp-read "Project: " nil :history 'research--repo-projects)
-                 :repo (research--comp-read "Repository: " nil))))))
+    (let* ((org (research--comp-read "Org: " nil :history 'research--repo-orgs))
+           (project (research--comp-read "Project: " nil :history 'research--repo-projects))
+           (repo (research--comp-read
+                  "Repository: "
+                  (mapcar (-rpartial #'plist-get :name)
+                          (-> (aio-await (research--request
+                                          "GET" (format "/%s/_apis/git/repositories" project)
+                                          :query '((api-version . "6.0"))
+                                          :host (format "dev.azure.com/%s" org)
+                                          :forge 'azdev))
+                              (plist-get :value))))))
+      (aio-await (research--add-recipe
+                  (research--az-rcp-new :org org :project project :repo repo))))))
 
 (cl-defmethod research--add-repo ((_type (eql 'github)))
   (aio-with-async
+    (let* ((org (research--comp-read "Org: " nil :history 'research--repo-orgs))
+           (repo (research--comp-read
+                  "Repository: "
+                  (mapcar (-rpartial #'plist-get :name)
+                          (-> (aio-await (research--request
+                                          "GET" "/search/repositories"
+                                          :query `((q . ,(format "user:%s fork:true" org))
+                                                   (per_page . 100))
+                                          :headers '(("Accept" . "application/vnd.github.v3+json"))
+                                          :host "api.github.com"))
+                              (plist-get :items))))))
     (aio-await (research--add-recipe
-                (research--gh-rcp-new
-                 :org (research--comp-read "Org: " nil :history 'research--repo-orgs)
-                 :repo (research--comp-read "Repository: " nil))))))
+                (research--gh-rcp-new :org org :repo repo))))))
 
 ;;;###autoload
 (defun research-add-repo (type)
