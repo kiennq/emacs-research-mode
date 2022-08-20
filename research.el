@@ -88,7 +88,7 @@
   (list (cons "Cookie"
               (or (plist-get (cdr (plstore-get research--auths host)) :cookie)
                   (let (cookie
-                        (url "https://cs.github.com/")
+                        (url "https://cs.github.com/auth/login?redirect_url=%2F")
                         (cookie-name "__Host-blackbird"))
                     (read-from-minibuffer
                      "The current cert is not valid. Press ENTER to open GitHub CodeSearch for verification.")
@@ -200,38 +200,34 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                     :callback (lambda (result &rest _) (aio-resolve promise (-const result)))
                     :errorback
                     (lambda (err _header _status req &rest _)
-                      (when-let ((err
-                                  (pcase-let ((`(,_symb . ,data) err))
-                                    (if (eq (car-safe data) 'http)
-                                        (pcase (car (cdr-safe data))
-                                          ((or 401 500)
-                                           (if (research--re-auth-p host auth forge)
-                                               (progn
-                                                 (aio-with-async
-                                                   (aio-resolve
-                                                    promise
-                                                    (-const (aio-await (research--request
-                                                                        method resource
-                                                                        :query query
-                                                                        :payload payload
-                                                                        :headers headers
-                                                                        :reader reader
-                                                                        :auth auth
-                                                                        :host host
-                                                                        :forge forge)))))
-                                                 nil)
-                                             (list 'http-error 401
-                                                   (nth 2 (assq 401 url-http-codes))
+                      (when-let* ((err-type (cl-second err))
+                                  (err-code (cl-third err))
+                                  (err-detail (cl-fourth err))
+                                  (err (when err-type
+                                         (if (eq err-type 'http)
+                                             (list 'http-error err-code
+                                                   (nth 2 (assq err-code url-http-codes))
                                                    (when req (url-filename (ghub--req-url req)))
-                                                   (cl-third data))))
-                                          (`,code
-                                           (list 'http-error code
-                                                 (nth 2 (assq code url-http-codes))
-                                                 (when req (url-filename (ghub--req-url req)))
-                                                 (cl-third data))))
-                                      err))))
+                                                   err-detail)
+                                           err))))
                         (message "%s::%s" (propertize "Research" 'face 'error) err)
-                        (aio-resolve promise (-const nil)))))
+                        (pcase err-code
+                          ((or 401 500)
+                           (if (research--re-auth-p host auth forge)
+                               (aio-with-async
+                                 (aio-resolve
+                                  promise
+                                  (-const (aio-await (research--request
+                                                      method resource
+                                                      :query query
+                                                      :payload payload
+                                                      :headers headers
+                                                      :reader reader
+                                                      :auth auth
+                                                      :host host
+                                                      :forge forge)))))
+                             (aio-resolve promise (-const nil))))
+                          (_ (aio-resolve promise (-const nil)))))))
       (aio-await promise))))
 
 (aio-defun research--shell (command)
