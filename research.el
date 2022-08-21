@@ -19,11 +19,10 @@
 (require 'cl-lib)
 (require 'files)
 (require 'browse-url)
-(require 'url-util)
+(require 'url)
 (require 'pulse)
 (require 'dash)
 (require 'ghub)
-(require 'plstore)
 (eval-when-compile
   (require 'subr-x))
 
@@ -54,8 +53,6 @@
 (defvar research-debug nil "Enable debug mode.")
 (defvar research--conn nil "ReSearchCLI jsonrpc connection.")
 
-(defconst research--auths-file (expand-file-name "auths" research--cache-path))
-
 (defconst research--helm-featurep (require 'helm nil 'noerror))
 (defconst research--ivy-featurep (require 'ivy nil 'noerror))
 
@@ -79,30 +76,25 @@
                    t)))))
 
 ;; GitHub Codesearch
-(defvar research--auths nil "`plstore' storage.")
 (cl-defmethod ghub--username (_host (_forge (eql 'cs-github))))
 (cl-defmethod ghub--auth (host (_auth (eql 'cookie)) _user (_forge (eql 'cs-github)))
-  "Authentication header for GitHub Codesearch with HOST."
-  (unless research--auths
-    (setq research--auths (plstore-open research--auths-file)))
-  (list (cons "Cookie"
-              (or (plist-get (cdr (plstore-get research--auths host)) :cookie)
-                  (let (cookie
-                        (url "https://cs.github.com/auth/login?redirect_url=%2F")
-                        (cookie-name "__Host-blackbird"))
-                    (read-from-minibuffer
-                     "The current cert is not valid. Press ENTER to open GitHub CodeSearch for verification.")
-                    (browse-url url)
-                    (setq cookie
-                          (format "%s=%s"
-                                  cookie-name
-                                  (read-from-minibuffer
-                                   (format "Enter the cookie of `%s' from the opened website: "
-                                           cookie-name))))
-                    (plstore-put research--auths host `(:cookie ,cookie) nil)
-                    (plstore-save research--auths)
-                    cookie)))
-        '("Authorization" . "")))
+  "Authentication header for GitHub Codesearch with HOST using cookie."
+  (unless (or (not url-setup-done) (url-cookie-retrieve host "/" 'secure))
+    (let ((url "https://cs.github.com/auth/login?redirect_url=%2F")
+          (cookie-name "__Host-blackbird"))
+      (read-from-minibuffer
+       "The current cert is not valid. Press ENTER to open GitHub CodeSearch for verification.")
+      (browse-url url)
+      (url-cookie-store cookie-name
+                        (read-from-minibuffer
+                         (format "Enter the cookie of `%s' from the opened website: "
+                                 cookie-name))
+                        (format-time-string "%a, %d %b %Y %k:%M:%S %z" (time-add (current-time)
+                                                                                 (* 365 24 3600)))
+                        host "/" 'secure)
+      (setq url-cookies-changed-since-last-save t)
+      (url-cookie-write-file)))
+  '("Authorization" . ""))
 
 (cl-defun research--comp-read (prompt collection
                                       &key
@@ -170,12 +162,12 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
          (macroexp-progn))))
 
 (cl-defgeneric research--re-auth-p (_host _auth _forge)
-  "Check if should try to re-authenticate for HOST with AUTH method of FORGE."
+  "Check if can re-authenticate for HOST with AUTH method of FORGE."
   nil)
 
 (cl-defmethod research--re-auth-p (host (_auth (eql 'cookie)) (_forge (eql 'cs-github)))
-  "Check if should try to re-authenticate for HOST of GitHub Codesearch."
-  (plstore-delete research--auths host)
+  "Check if can re-authenticate for HOST of GitHub Codesearch."
+  (url-cookie-delete-cookies host)
   t)
 
 ;; TODO: create a class/truct so that we can use method specialization defmethod
