@@ -4,6 +4,8 @@ Code search integration for `Emacs`
 `research.el` is an `Emacs`'s plugin that can be used for code searching on `Azure DevOps` and `GitHub` repo.
 Support for other forges integration are now under development.
 
+![research in action](./images/demo_add_repo_and_query.gif)
+
 ### News
 - 12/23/2021: Add support for `GitHub` code search
 
