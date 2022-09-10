@@ -25,15 +25,18 @@
 (require 'package)
 
 (let* ((package-archives '(("melpa" . "https://melpa.org/packages/")
-                           ("gnu" . "https://elpa.gnu.org/packages/")))
+                           ("gnu-devel"    . "https://elpa.gnu.org/devel/")
+                           ("gnu-stable"   . "https://elpa.gnu.org/packages/")
+                           ("nongnu"       . "https://elpa.nongnu.org/nongnu/")))
        (no-byte-compile t)
        (user-emacs-directory (expand-file-name (make-temp-name ".emacs.d")
                                                "~"))
        (package-user-dir (expand-file-name (make-temp-name "tmp-elpa")
                                            user-emacs-directory))
        (custom-file (expand-file-name "custom.el" package-user-dir))
-       (deps '(aio helm dash f ghub
-               (jsonrpc :fetcher url :url "http://git.savannah.gnu.org/cgit/emacs.git/plain/lisp/jsonrpc.el"))))
+       (deps '( aio helm dash f compat
+                (ghub :fetcher github :repo "kiennq/ghub" :files ("lisp/*.el" "docs/ghub.texi")))))
+  (package-refresh-contents)
   (package-initialize)
 
   ;; bootstrap quelpa
@@ -44,7 +47,9 @@
       (quelpa-self-upgrade)))
 
   (mapc (lambda (pkg)
-          (quelpa pkg)
+          (if (listp pkg)
+              (quelpa pkg)
+            (package-install pkg))
           (require (if (listp pkg) (car pkg) pkg)))
         deps)
   (add-hook 'kill-emacs-hook `(lambda ()
