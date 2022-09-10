@@ -707,11 +707,12 @@ It's a plist of (:re research--code-result :idx :skip-calc-pos).")
 (cl-defun research--save-current-buffer-result (buf result
                                                     &key
                                                     pos skip-calc-pos)
-  "BUFFER RESULT POS SKIP-CALC-POS."
-  (setf (buffer-local-value 'research--current-buffer-result buf)
-        `( :re ,result
-           :idx ,(cl-position pos (research--code-result-matches result)))
-        (buffer-local-value 'research--skip-calc-pos? buf) skip-calc-pos))
+  "BUF RESULT POS SKIP-CALC-POS."
+  (with-current-buffer buf
+    (setq research--current-buffer-result
+          `( :re ,result
+             :idx ,(cl-position pos (research--code-result-matches result)))
+          research--skip-calc-pos? skip-calc-pos)))
 
 (declare-function ivy-read "ext:ivy")
 (declare-function helm "ext:helm")
