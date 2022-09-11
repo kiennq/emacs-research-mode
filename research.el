@@ -169,7 +169,9 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 (cl-defmethod research--re-auth-p (host (_auth (eql 'cookie)) (_forge (eql 'cs-github)))
   "Check if can re-authenticate for HOST of GitHub Codesearch."
   (when-let* ((has-domain? (string-match
-                            (rx (*? anything) (* ?.) (group  (+? (not ?.)) ?. (+? (not ?.))) eol)
+                            (rx (*? anything) (* ?.)
+                                (group  (+? (not (any ?.))) ?. (+? (not (any ?.))))
+                                eol)
                             host))
               (domain (match-string 1 host)))
     (url-cookie-delete-cookies domain)
