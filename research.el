@@ -54,9 +54,6 @@
 (defvar research-debug nil "Enable debug mode.")
 (defvar research--conn nil "ReSearchCLI jsonrpc connection.")
 
-(defconst research--helm-featurep (require 'helm nil 'noerror))
-(defconst research--ivy-featurep (require 'ivy nil 'noerror))
-
 (declare-function evil-set-command-property "ext:evil-common")
 
 ;; AzureDevOps
@@ -258,10 +255,10 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 
 (cl-defstruct research--repo
   "Base type for the repository that we search on."
-  (name nil :document "Display name." :read-only t)
+  (name nil :documentation "Display name." :read-only t)
   (id)
   (rcp nil :read-only t)
-  (root nil :document "The path to repo's code.")
+  (root nil :documentation "The path to repo's code.")
   (skip-calc-pos t))
 
 (cl-defstruct (research--az-repo (:constructor research--az-repo-new)
@@ -451,11 +448,11 @@ into query list target."
 
 (cl-defstruct research--code-result
   "The code result"
-  (path nil :document "Path to current result.")
-  (url nil :document "URL to the current result.")
-  (id nil :document "Version id.")
+  (path nil :documentation "Path to current result.")
+  (url nil :documentation "URL to the current result.")
+  (id nil :documentation "Version id.")
   (repo nil)
-  (matches nil :type list :document "List of offsets"))
+  (matches nil :type list :documentation "List of offsets"))
 
 (cl-defstruct (research--az-code-result (:constructor research--az-code-result-new)
                                         (:include research--code-result))
@@ -730,7 +727,7 @@ It's a plist of (:re research--code-result :idx :skip-calc-pos).")
      0 nil
      (lambda (collection action-fn)
        (cond
-         (research--ivy-featurep
+         ((bound-and-true-p ivy-mode)
           (ivy-read (format "pattern [%s]: " (car research--query-history))
                     collection
                     :require-match t
@@ -745,7 +742,7 @@ It's a plist of (:re research--code-result :idx :skip-calc-pos).")
                       ("b" (lambda (re) (funcall ,action-fn `(,(cdr re) web)))
                            "Open in browser"))
                     :caller 'research-results))
-         (research--helm-featurep
+         ((bound-and-true-p helm-mode)
           (helm
            :sources (helm-build-sync-source
                      "ReSearch results:"
