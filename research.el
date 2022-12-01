@@ -304,38 +304,39 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                  :branch name))
               indexed-branches))))
 
-;; (cl-defmethod research--get-collections ((repo-rcp research--gh-rcp))
-;;   (aio-with-async
-;;     (-let* (((&research--gh-rcp :org :repo) repo-rcp)
-;;             (col (aio-await
-;;                   (research--request "GET" "/search/repositories"
-;;                                      :headers '(("Accept" . "application/vnd.github.v3+json"))
-;;                                      :query `((q . ,(format "repo:%s/%s" org repo)))
-;;                                      :host "api.github.com"
-;;                                      :forge 'github)))
-;;             ((&plist :items) col))
-;;       (mapcar (-lambda ((&plist :id))
-;;                 (research--gh-repo-new
-;;                  :name (format "GitHub/%s/%s" org repo)
-;;                  :id id
-;;                  :rcp repo-rcp))
-;;               items))))
-
 (cl-defmethod research--get-collections ((repo-rcp research--gh-rcp))
   (aio-with-async
-    (-when-let* (((&research--gh-rcp :org :repo) repo-rcp)
-                 (col (aio-await
-                       (research--request "GET" (format "/api/repos/%s/%s" org repo)
-                                          :auth 'cookie
-                                          :host "cs.github.com"
-                                          :forge 'cs-github)))
-                 ((&plist :RepoID id) col))
-      (list
-       (research--gh-repo-new
-        :name (format "GitHub/%s/%s" org repo)
-        :id id
-        :skip-calc-pos 'undefined
-        :rcp repo-rcp)))))
+    (-let* (((&research--gh-rcp :org :repo) repo-rcp)
+            (col (aio-await
+                  (research--request "GET" "/search/repositories"
+                                     :headers '(("Accept" . "application/vnd.github.v3+json"))
+                                     :query `((q . ,(format "repo:%s/%s fork:true" org repo)))
+                                     :host "api.github.com"
+                                     :forge 'github)))
+            ((&plist :items) col))
+      (mapcar (-lambda ((&plist :id))
+                (research--gh-repo-new
+                 :name (format "GitHub/%s/%s" org repo)
+                 :id id
+                 :skip-calc-pos 'undefined
+                 :rcp repo-rcp))
+              items))))
+
+;; (cl-defmethod research--get-collections ((repo-rcp research--gh-rcp))
+;;   (aio-with-async
+;;     (-when-let* (((&research--gh-rcp :org :repo) repo-rcp)
+;;                  (col (aio-await
+;;                        (research--request "GET" (format "/api/repos/%s/%s" org repo)
+;;                                           :auth 'cookie
+;;                                           :host "cs.github.com"
+;;                                           :forge 'cs-github)))
+;;                  ((&plist :RepoID id) col))
+;;       (list
+;;        (research--gh-repo-new
+;;         :name (format "GitHub/%s/%s" org repo)
+;;         :id id
+;;         :skip-calc-pos 'undefined
+;;         :rcp repo-rcp)))))
 
 (defvar research--inuse-collections nil)
 
@@ -929,7 +930,7 @@ Optionally open ignore cache with FORCE."
   "In buffer BUFFER, jump to true position of RAW-POS."
   (switch-to-buffer buffer)
   (let* ((raw-pos (if (stringp raw-pos) (string-to-number raw-pos) raw-pos))
-         (pos (if (equal raw-pos 0) (point-min) (research--buf-pos raw-pos))))
+         (pos (if (equal raw-pos 0) (point) (research--buf-pos raw-pos))))
     (goto-char pos)
     (recenter)
     (when research-pulse-at-cursor
