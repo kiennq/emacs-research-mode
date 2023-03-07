@@ -196,16 +196,15 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                     :callback (lambda (result &rest _) (aio-resolve promise (-const result)))
                     :errorback
                     (lambda (err _header _status req &rest _)
-                      (when-let* ((err-type (cl-second err))
-                                  (err-code (cl-third err))
-                                  (err-detail (cl-fourth err))
-                                  (err (when err-type
-                                         (if (eq err-type 'http)
-                                             (list 'http-error err-code
-                                                   (nth 2 (assq err-code url-http-codes))
-                                                   (when req (url-filename (ghub--req-url req)))
-                                                   err-detail)
-                                           err))))
+                      (let* ((err-type (cl-second err))
+                             (err-code (cl-third err))
+                             (err-detail (cl-fourth err))
+                             (err (if (eq err-type 'http)
+                                        (list 'http-error err-code
+                                              (nth 2 (assq err-code url-http-codes))
+                                              (when req (url-filename (ghub--req-url req)))
+                                              err-detail)
+                                    err)))
                         (message "%s::%s" (propertize "Research" 'face 'error) err)
                         (pcase err-code
                           ((or 401 500)
