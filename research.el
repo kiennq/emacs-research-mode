@@ -240,6 +240,12 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
          (kill-buffer buf))))
     (aio-await promise)))
 
+(defsubst research--encode-url (url)
+  "Call `url-encode-url' for URL."
+  (pcase url
+    ((pred stringp) (url-encode-url url))
+    (_ url)))
+
 (cl-defstruct research--rcp
   "Recipe for the repository."
   (org)
@@ -289,10 +295,10 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
     (-let* (((&research--az-rcp :org :project :repo) repo-rcp)
             (col (aio-await
                    (research--request "GET" (format "/%s/_apis/search/status/repositories/%s"
-                                                    (url-encode-url project)
-                                                    (url-encode-url repo))
+                                                    (research--encode-url project)
+                                                    (research--encode-url repo))
                                       :query '((api-version . "6.0-preview.1"))
-                                      :host (format "almsearch.dev.azure.com/%s" (url-encode-url org))
+                                      :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
                                       :forge 'azdev)))
             ((&plist :id :indexedBranches indexed-branches) col))
       (mapcar (-lambda ((&plist :name))
@@ -327,8 +333,8 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 ;;     (-when-let* (((&research--gh-rcp :org :repo) repo-rcp)
 ;;                  (col (aio-await
 ;;                        (research--request "GET" (format "/api/repos/%s/%s"
-;;                                                         (url-encode-url org)
-;;                                                         (url-encode-url repo))
+;;                                                         (research--encode-url org)
+;;                                                         (research--encode-url repo))
 ;;                                           :auth 'cookie
 ;;                                           :host "cs.github.com"
 ;;                                           :forge 'cs-github)))
@@ -406,9 +412,9 @@ into query list target."
                   (mapcar (-rpartial #'plist-get :name)
                           (-> (aio-await (research--request
                                           "GET" (format "/%s/_apis/git/repositories"
-                                                        (url-encode-url project))
+                                                        (research--encode-url project))
                                           :query '((api-version . "6.0"))
-                                          :host (format "dev.azure.com/%s" (url-encode-url org))
+                                          :host (format "dev.azure.com/%s" (research--encode-url org))
                                           :forge 'azdev))
                               (plist-get :value))))))
       (aio-await (research--add-recipe
@@ -518,7 +524,7 @@ Return at most MAX-RESULT items.")
                                          :filters ( :project [,project]
                                                     :repository [,repo]
                                                     :branch [,branch]))
-                             :host (format "almsearch.dev.azure.com/%s" (url-encode-url org))
+                             :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
                              :forge 'azdev)))
             ((&plist :results :infoCode info) res)
             (files (mapcar (-lambda ((&plist :path :versions
@@ -527,11 +533,11 @@ Return at most MAX-RESULT items.")
                              (research--az-code-result-new
                               :path path
                               :url (format "https://dev.azure.com/%s/%s/_git/%s?path=%s&version=GB%s"
-                                           (url-encode-url org)
-                                           (url-encode-url project)
-                                           (url-encode-url id)
-                                           (url-encode-url path)
-                                           (url-encode-url branch))
+                                           (research--encode-url org)
+                                           (research--encode-url project)
+                                           (research--encode-url id)
+                                           (research--encode-url path)
+                                           (research--encode-url branch))
                               :id (-> versions (elt 0) (plist-get :changeId))
                               :content-id content-id
                               :repo collection
@@ -610,10 +616,10 @@ Return at most MAX-RESULT items.")
                      (research--gh-code-result-new
                       :path path
                       :url (format "https://github.com/%s/%s/blob/%s/%s"
-                                   (url-encode-url org)
-                                   (url-encode-url repo)
-                                   (url-encode-url commit_sha)
-                                   (url-encode-url path))
+                                   (research--encode-url org)
+                                   (research--encode-url repo)
+                                   (research--encode-url commit_sha)
+                                   (research--encode-url path))
                       :id sha
                       :repo collection
                       :matches (mapcar (-rpartial #'plist-get :start) matches))))
@@ -831,15 +837,15 @@ It's a plist of (:re research--code-result :idx :skip-calc-pos).")
         ("git"
          (aio-await (research--request
                      "GET" (format "/%s/_apis/git/repositories/%s/items"
-                                   (url-encode-url project)
-                                   (url-encode-url repo))
+                                   (research--encode-url project)
+                                   (research--encode-url repo))
                      :query `((api-version . "6.0-preview.1")
                               (versionType . "commit")
                               (version . ,id)
                               (scopePath . ,path))
                      :reader (lambda (&rest _) (buffer-substring-no-properties
                                                 (point) (point-max)))
-                     :host (format "dev.azure.com/%s" (url-encode-url org))
+                     :host (format "dev.azure.com/%s" (research--encode-url org))
                      :forge 'azdev)))
         ("custom"
          (-> (aio-await (research--request
@@ -861,8 +867,8 @@ It's a plist of (:re research--code-result :idx :skip-calc-pos).")
            file]
       (-some-> (aio-await (research--request
                            "GET" (format "/repositories/%s/git/blobs/%s"
-                                         (url-encode-url repo-id)
-                                         (url-encode-url id))
+                                         (research--encode-url repo-id)
+                                         (research--encode-url id))
                            :host "api.github.com"
                            :forge 'github))
         (plist-get :content)
