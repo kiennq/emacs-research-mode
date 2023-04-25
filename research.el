@@ -178,52 +178,50 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 (cl-defun research--request (method resource
                                     &key query payload headers reader auth host forge)
   "Wrapper of `ghub-request' in async form."
-  (aio-with-async
-    (-let ((promise (aio-promise))
-           (ghub-json-object-type 'plist)
-           (ghub-json-array-type 'array)
-           (ghub-json-null-object nil)
-           (ghub-json-false-object nil)
-           (ghub-json-use-jansson t))
-      (ghub-request method resource nil
-                    :query query
-                    :payload payload
-                    :headers headers
-                    :reader reader
-                    :auth (or auth 'token)
-                    :host host
-                    :forge forge
-                    :callback (lambda (result &rest _) (aio-resolve promise (-const result)))
-                    :errorback
-                    (lambda (err _header _status req &rest _)
-                      (let* ((err-type (cl-second err))
-                             (err-code (cl-third err))
-                             (err-detail (cl-fourth err))
-                             (err (if (eq err-type 'http)
-                                        (list 'http-error err-code
-                                              (nth 2 (assq err-code url-http-codes))
-                                              (when req (url-filename (ghub--req-url req)))
-                                              err-detail)
-                                    err)))
-                        (message "%s::%s" (propertize "Research" 'face 'error) err)
-                        (pcase err-code
-                          ((or 401 500)
-                           (if (research--re-auth-p host auth forge)
-                               (aio-with-async
-                                 (aio-resolve
-                                  promise
-                                  (-const (aio-await (research--request
-                                                      method resource
-                                                      :query query
-                                                      :payload payload
-                                                      :headers headers
-                                                      :reader reader
-                                                      :auth auth
-                                                      :host host
-                                                      :forge forge)))))
-                             (aio-resolve promise (-const nil))))
-                          (_ (aio-resolve promise (-const nil)))))))
-      (aio-await promise))))
+  (-let ((promise (aio-promise))
+         (ghub-json-object-type 'plist)
+         (ghub-json-array-type 'array)
+         (ghub-json-null-object nil)
+         (ghub-json-false-object nil))
+    (ghub-request method resource nil
+                  :query query
+                  :payload payload
+                  :headers headers
+                  :reader reader
+                  :auth (or auth 'token)
+                  :host host
+                  :forge forge
+                  :callback (lambda (result &rest _) (aio-resolve promise (-const result)))
+                  :errorback
+                  (lambda (err _header _status req &rest _)
+                    (let* ((err-type (cl-second err))
+                           (err-code (cl-third err))
+                           (err-detail (cl-fourth err))
+                           (err (if (eq err-type 'http)
+                                    (list 'http-error err-code
+                                          (nth 2 (assq err-code url-http-codes))
+                                          (when req (url-filename (ghub--req-url req)))
+                                          err-detail)
+                                  err)))
+                      (message "%s::%s" (propertize "Research" 'face 'error) err)
+                      (pcase err-code
+                        ((or 401 500)
+                         (if (research--re-auth-p host auth forge)
+                             (aio-with-async
+                               (aio-resolve
+                                promise
+                                (-const (aio-await (research--request
+                                                    method resource
+                                                    :query query
+                                                    :payload payload
+                                                    :headers headers
+                                                    :reader reader
+                                                    :auth auth
+                                                    :host host
+                                                    :forge forge)))))
+                           (aio-resolve promise (-const nil))))
+                        (_ (aio-resolve promise (-const nil)))))))
+    promise))
 
 (aio-defun research--shell (command)
   "Asynchronously execute shell command COMMAND and return its output string."
