@@ -1,10 +1,10 @@
 ;;; research.el --- research integration  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2019 Free Software Foundation, Inc.
+;; Copyright (C) 2023 Free Software Foundation, Inc.
 
 ;; Author: Park Jiin; Kien Nguyen
 ;; Maintainer: Park Jiin; Kien Nguyen
-;; Version: 3.0
+;; Version: 3.1
 ;; Keywords: research, source
 ;; Package-Requires: ((emacs "26.1") (aio "1.0") (dash "2.19.1") (ghub))
 
@@ -75,21 +75,21 @@
 
 ;; GitHub Codesearch
 (cl-defmethod ghub--username (_host (_forge (eql 'cs-github))))
-(cl-defmethod ghub--auth (host (_auth (eql 'cookie)) _user (_forge (eql 'cs-github)))
+(cl-defmethod ghub--auth (host (_auth (eql 'cookie)) _user _forge)
   "Authentication header for GitHub Codesearch with HOST using cookie."
   (unless (or (not url-setup-done) (url-cookie-retrieve host "/" 'secure))
-    (let ((url "https://cs.github.com/auth/login?redirect_url=%2F")
-          (cookie-name "__Host-blackbird"))
+    (let ((url "https://github.com/search"))
       (read-from-minibuffer
-       "The current cert is not valid. Press ENTER to open GitHub CodeSearch for verification.")
+       "The current cookies need refresh. Press ENTER to open GitHub Search for verification.")
       (browse-url url)
-      (url-cookie-store cookie-name
-                        (read-from-minibuffer
-                         (format "Enter the cookie of `%s' from the opened website: "
-                                 cookie-name))
-                        (format-time-string "%a, %d %b %Y %k:%M:%S %z" (time-add (current-time)
-                                                                                 (* 365 24 3600)))
-                        host "/" 'secure)
+      (let* ((ghub-json-object-type 'plist)
+             (ghub-json-array-type 'array)
+             (ghub-json-null-object nil)
+             (ghub-json-false-object nil))
+        (->> (ghub--json-parse-string
+              (read-from-minibuffer "Enter the json cookies (via Cookie-Editor) from the opened website: "))
+             (mapc (-lambda ((&plist :name :value :expirationDate :domain :path :secure))
+                     (url-cookie-store name value (format "%s" expirationDate) domain path secure)))))
       (setq url-cookies-changed-since-last-save t)
       (url-cookie-write-file)))
   '("Authorization" . ""))
@@ -163,7 +163,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
   "Check if can re-authenticate for HOST with AUTH method of FORGE."
   nil)
 
-(cl-defmethod research--re-auth-p (host (_auth (eql 'cookie)) (_forge (eql 'cs-github)))
+(cl-defmethod research--re-auth-p (host (_auth (eql 'cookie)) _forge)
   "Check if can re-authenticate for HOST of GitHub Codesearch."
   (when-let* ((has-domain? (string-match
                             (rx (*? anything) (* ?.)
@@ -205,7 +205,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                                   err)))
                       (message "%s::%s" (propertize "Research" 'face 'error) err)
                       (pcase err-code
-                        ((or 401 500)
+                        ((or 401 404 500)
                          (if (research--re-auth-p host auth forge)
                              (aio-with-async
                                (aio-resolve
@@ -596,20 +596,21 @@ Return at most MAX-RESULT items.")
               :id repo-id
               :rcp (&research--gh-rcp :org :repo))
              collection)
+            (url-mime-accept-string "application/json")
             (res (aio-await (research--request
-                             "GET" "/api/search"
-                             :query `((q . ,query)
-                                      (repo . ,(format "%s/%s" org repo))
+                             "GET" "/search"
+                             :query `((q . ,(format "repo:%s/%s %s" org repo query))
+                                      (type . "code")
                                       (p . ,page))
                              :auth 'cookie
-                             :host "cs.github.com"
+                             :host "github.com"
                              :forge 'cs-github)))
-            ((&plist :results) res))
+            ((&plist :payload (&plist :results)) res))
       (--remove (not it)
                 (mapcar
-                 (-lambda ((&plist :path :sha :commit_sha
+                 (-lambda ((&plist :path :blob_sha :commit_sha
                                    :repo_id
-                                   :matches))
+                                   :term_matches))
                    (when (equal repo-id repo_id)
                      (research--gh-code-result-new
                       :path path
@@ -618,9 +619,9 @@ Return at most MAX-RESULT items.")
                                    (research--encode-url repo)
                                    (research--encode-url commit_sha)
                                    (research--encode-url path))
-                      :id sha
+                      :id blob_sha
                       :repo collection
-                      :matches (mapcar (-rpartial #'plist-get :start) matches))))
+                      :matches (mapcar (-rpartial #'plist-get :start) term_matches))))
                  results)))))
 
 ;;;###autoload
