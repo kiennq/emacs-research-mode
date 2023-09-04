@@ -41,12 +41,12 @@
                                                  user-emacs-directory)
   "Path to store research's cache files.")
 
-(defcustom research-recipes-file (expand-file-name "recipes" research--cache-path)
+(defcustom research-recipes-file (expand-file-name "repos" research--cache-path)
   "File to save the repo's recipes."
   :group 'research
   :type 'file)
 
-(defcustom research-repos-file (expand-file-name "repos" research--cache-path)
+(defcustom research-cols-file (expand-file-name "collections" research--cache-path)
   "File to cache the available repos."
   :group 'research
   :type 'file)
@@ -246,6 +246,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 
 (cl-defstruct research--rcp
   "Recipe for the repository."
+  (id)
   (org)
   (repo))
 
@@ -290,7 +291,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 
 (cl-defmethod research--get-collections ((repo-rcp research--az-rcp))
   (aio-with-async
-    (-let* (((&research--az-rcp :org :project :repo) repo-rcp)
+    (-let* (((&research--az-rcp :id rcp-id :org :project :repo) repo-rcp)
             (col (aio-await
                    (research--request "GET" (format "/%s/_apis/search/status/repositories/%s"
                                                     (research--encode-url project)
@@ -299,18 +300,18 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                                       :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
                                       :forge 'azdev)))
             ((&plist :id :indexedBranches indexed-branches) col))
-      (mapcar (-lambda ((&plist :name))
+      (mapcar (-lambda ((&plist :name branch))
                 (research--az-repo-new
-                 :name (format "AzDev/%s/%s/%s/%s" org project repo name)
+                 :name (substring-no-properties (format "%s/%s" rcp-id branch))
                  :id id
                  :rcp repo-rcp
                  :skip-calc-pos 'undefined
-                 :branch name))
+                 :branch branch))
               indexed-branches))))
 
 (cl-defmethod research--get-collections ((repo-rcp research--gh-rcp))
   (aio-with-async
-    (-let* (((&research--gh-rcp :org :repo) repo-rcp)
+    (-let* (((&research--gh-rcp :id rcp-id :org :repo) repo-rcp)
             (col (aio-await
                   (research--request "GET" "/search/repositories"
                                      :headers '(("Accept" . "application/vnd.github.v3+json"))
@@ -320,7 +321,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
             ((&plist :items) col))
       (mapcar (-lambda ((&plist :id))
                 (research--gh-repo-new
-                 :name (format "GitHub/%s/%s" org repo)
+                 :name (substring-no-properties (format "%s" rcp-id))
                  :id id
                  :skip-calc-pos 'undefined
                  :rcp repo-rcp))
@@ -361,7 +362,7 @@ into query list target."
       (let ((collections (or (and (not force) research--collections)
                              (setq research--collections
                                    (research--save
-                                    research-repos-file
+                                    research-cols-file
                                     (mapcar (lambda (col)
                                               `(,(research--repo-name col) . ,col))
                                             (let ((repos (mapcar
@@ -392,7 +393,7 @@ into query list target."
   "Add repository with RECIPE into search collections."
   (research--save research-recipes-file
                   (setq research--rcps (add-to-list 'research--rcps recipe)))
-  (research--save research-repos-file
+  (research--save research-cols-file
                   (setq research--collections
                         (nconc research--collections
                                (mapcar (lambda (col) `(,(research--repo-name col) . ,col))
@@ -416,7 +417,9 @@ into query list target."
                                           :forge 'azdev))
                               (plist-get :value))))))
       (aio-await (research--add-recipe
-                  (research--az-rcp-new :org org :project project :repo repo))))))
+                  (research--az-rcp-new
+                   :id (substring-no-properties (format "AzDev/%s/%s/%s" org project repo))
+                   :org org :project project :repo repo))))))
 
 (cl-defmethod research--add-repo ((_type (eql 'github)))
   (aio-with-async
@@ -432,15 +435,26 @@ into query list target."
                                           :host "api.github.com"))
                               (plist-get :items))))))
     (aio-await (research--add-recipe
-                (research--gh-rcp-new :org org :repo repo))))))
+                (research--gh-rcp-new
+                 :id (substring-no-properties (format "GitHub/%s/%s" org repo))
+                 :org org :repo repo))))))
 
 ;;;###autoload
 (defun research-add-repo (type)
-  "Add a repository into search collections."
+  "Add a repository of TYPE into search collections."
   (interactive (list (research--comp-read "Type: " `(("Azure DevOps"    . azdev)
                                                      ("GitHub"          . github))
                                           :require-match t)))
   (research--add-repo type))
+
+;;;###autoload
+(defun research-remove-repo (repo)
+  "Remove recipe REPO from search collections."
+  (interactive (list (research--comp-read "Repo: "
+                                          (mapcar (lambda (rcp) `(,(research--rcp-id rcp) . ,rcp))
+                                                  research--rcps)
+                                          :require-match t)))
+  (delete repo research--rcps))
 
 ;; retain query history for its own buffer
 (defvar research--query-history nil)
@@ -965,7 +979,7 @@ Optionally open ignore cache with FORCE."
   (research-exit)
   (setq research--rcps (or (research--restore research-recipes-file)
                            research--rcps))
-  (setq research--collections (research--restore research-repos-file)))
+  (setq research--collections (research--restore research-cols-file)))
 
 (defun research-exit ()
   "Kill reSearch middleware process."
