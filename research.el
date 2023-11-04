@@ -51,6 +51,12 @@
   :group 'research
   :type 'file)
 
+(defcustom research-default-auth-method 'token
+  "Default method for authentication."
+  :group 'research
+  :type `(choice (const :tag "Use token for authentication." token)
+                 (const :tag "Use imported cookies for authenitcation." cookie)))
+
 (defvar research-debug nil "Enable debug mode.")
 (defvar research--conn nil "ReSearchCLI jsonrpc connection.")
 
@@ -74,24 +80,41 @@
                    t)))))
 
 ;; GitHub Codesearch
-(cl-defmethod ghub--username (_host (_forge (eql 'cs-github))))
+(cl-defmethod ghub--username (_host (_forge (eql 'cs-github)))
+  ""
+  "cs-github")
+
 (cl-defmethod ghub--auth (host (_auth (eql 'cookie)) _user _forge)
-  "Authentication header for GitHub Codesearch with HOST using cookie."
-  (unless (or (not url-setup-done) (url-cookie-retrieve host "/" 'secure))
-    (let ((url "https://github.com/search"))
-      (read-from-minibuffer
-       "The current cookies need refresh. Press ENTER to open GitHub Search for verification.")
-      (browse-url url)
-      (let* ((ghub-json-object-type 'plist)
-             (ghub-json-array-type 'array)
-             (ghub-json-null-object nil)
-             (ghub-json-false-object nil))
-        (->> (ghub--json-parse-string
-              (read-from-minibuffer "Enter the json cookies (via Cookie-Editor) from the opened website: "))
-             (mapc (-lambda ((&plist :name :value :expirationDate :domain :path :secure))
-                     (url-cookie-store name value (format "%s" expirationDate) domain path secure)))))
-      (setq url-cookies-changed-since-last-save t)
-      (url-cookie-write-file)))
+  "Authentication header with HOST using cookie."
+  (when-let* ((pred1 url-setup-done)
+              (default-exp "12/31/2099")
+              (url (format "https://%s" host))
+              (urlobj (url-generic-parse-url url))
+              (host (url-host urlobj))
+              (path (let ((raw-path (car (url-path-and-query urlobj))))
+                      (if (> (length raw-path) 0) raw-path "/")))
+              (pred2 (not (url-cookie-retrieve host path 'secure))))
+    (read-from-minibuffer
+     (format "The current cookies need refresh. Press ENTER to open %s for verification." url))
+    (browse-url url)
+    (let* ((ghub-json-object-type 'plist)
+           (ghub-json-array-type 'array)
+           (ghub-json-null-object nil)
+           (ghub-json-false-object nil))
+      (->> (ghub--json-parse-string
+            (read-from-minibuffer
+             "Login and enter the json cookies (via Cookie-Editor) from the opened website: "))
+           (mapc (-lambda ((&plist :name :value :expirationDate :domain :path :secure))
+                   (url-cookie-store name value
+                                     (pcase expirationDate
+                                       ((pred numberp)
+                                        (format-time-string "%FT%T%z" (seconds-to-time expirationDate)))
+                                       (_ (format "%s" expirationDate)))
+                                     domain path secure)))))
+    ;; Mark the host cookies have been imported
+    (url-cookie-store "__imported_" "1" default-exp host path 'secure)
+    (setq url-cookies-changed-since-last-save t)
+    (url-cookie-write-file))
   '("Authorization" . ""))
 
 (cl-defun research--comp-read (prompt collection
@@ -165,12 +188,13 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 
 (cl-defmethod research--re-auth-p (host (_auth (eql 'cookie)) _forge)
   "Check if can re-authenticate for HOST of GitHub Codesearch."
-  (when-let* ((has-domain? (string-match
-                            (rx (*? anything) (* ?.)
-                                (group  (+? (not (any ?.))) ?. (+? (not (any ?.))))
-                                eol)
-                            host))
-              (domain (match-string 1 host)))
+  (when-let* ((url (format "https://%s" host))
+              (urlobj (url-generic-parse-url url))
+              (host (url-host urlobj))
+              (path (let ((raw-path (car (url-path-and-query urlobj))))
+                      (if (> (length raw-path) 0) raw-path "/")))
+              (domain (url-domain urlobj))
+              (has-domain? (url-cookie-retrieve host path 'secure)))
     (url-cookie-delete-cookies domain)
     t))
 
@@ -188,7 +212,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                   :payload payload
                   :headers headers
                   :reader reader
-                  :auth (or auth 'token)
+                  :auth (or auth research-default-auth-method 'token)
                   :host host
                   :forge forge
                   :callback (lambda (result &rest _) (aio-resolve promise (-const result)))
@@ -528,7 +552,7 @@ Return at most MAX-RESULT items.")
               :rcp (&research--az-rcp :org :project :repo))
              collection)
             (res (aio-await (research--request
-                             "POST" "/_apis/search/advancedCodeSearchResults" 
+                             "POST" "/_apis/search/advancedCodeSearchResults"
                              :query '((api-version . "6.0-preview.1"))
                              :payload `( :$top ,max-result
                                          :$skip ,(* (1- page) max-result)
