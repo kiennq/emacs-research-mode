@@ -182,12 +182,12 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                      `(,f ,source))))))
          (macroexp-progn))))
 
-(cl-defgeneric research--re-auth-p (_host _auth _forge)
-  "Check if can re-authenticate for HOST with AUTH method of FORGE."
+(cl-defgeneric research--refresh-auth (_host _auth _forge)
+  "Try to re-authenticate for HOST with AUTH method of FORGE."
   nil)
 
-(cl-defmethod research--re-auth-p (host (_auth (eql 'cookie)) _forge)
-  "Check if can re-authenticate for HOST of GitHub Codesearch."
+(cl-defmethod research--refresh-auth (host (_auth (eql 'cookie)) _forge)
+  "Try to re-authenticate via cookie for HOST of FORGE."
   (when-let* ((url (format "https://%s" host))
               (urlobj (url-generic-parse-url url))
               (host (url-host urlobj))
@@ -202,17 +202,20 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 (cl-defun research--request (method resource
                                     &key query payload headers reader auth host forge)
   "Wrapper of `ghub-request' in async form."
-  (-let ((promise (aio-promise))
-         (ghub-json-object-type 'plist)
-         (ghub-json-array-type 'array)
-         (ghub-json-null-object nil)
-         (ghub-json-false-object nil))
+  (let ((promise (aio-promise))
+        (ghub-json-object-type 'plist)
+        (ghub-json-array-type 'array)
+        (ghub-json-null-object nil)
+        (ghub-json-false-object nil)
+        (auth (or auth research-default-auth-method 'token)))
+    (when (> 0 (prefix-numeric-value current-prefix-arg))
+      (research--refresh-auth host auth forge))
     (ghub-request method resource nil
                   :query query
                   :payload payload
                   :headers headers
                   :reader reader
-                  :auth (or auth research-default-auth-method 'token)
+                  :auth auth
                   :host host
                   :forge forge
                   :callback (lambda (result &rest _) (aio-resolve promise (-const result)))
@@ -230,7 +233,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                       (message "%s::%s" (propertize "Research" 'face 'error) err)
                       (pcase err-code
                         ((or 401 404 500)
-                         (if (research--re-auth-p host auth forge)
+                         (if (research--refresh-auth host auth forge)
                              (aio-with-async
                                (aio-resolve
                                 promise
@@ -381,34 +384,34 @@ from refreshed collections instead of cached one.
 into query list target."
   (interactive "p")
   (aio-with-async
-    (let ((force (equal option 16))
-          (add-new (equal option 4)))
-      (let ((collections (or (and (not force) research--collections)
-                             (setq research--collections
-                                   (research--save
-                                    research-cols-file
-                                    (mapcar (lambda (col)
-                                              `(,(research--repo-name col) . ,col))
-                                            (let ((repos (mapcar
-                                                          (aio-lambda (rcp)
-                                                            (aio-await (research--get-collections rcp)))
-                                                          research--rcps)))
-                                              (aio-await (aio-all repos))
-                                              (apply #'nconc (mapcar #'aio-wait-for repos)))))))))
-        (setq research--inuse-collections
-              (append
-               (when add-new research--inuse-collections)
-               `(,(research--comp-read
-                   (format "%s Collection [%s]: "
-                           (cond (add-new "Add")
-                                 (t ""))
-                           (mapcar #'research--repo-name research--inuse-collections))
-                   (if (vectorp collections) (append collections nil) collections)
-                   :require-match t
-                   :initial-input
-                   (when (and (not research--collections)
-                              (executable-find "SourceControl.Git.ShellAdapter"))
-                     (aio-await (research--shell "SourceControl.Git.ShellAdapter GetOfficialBranch")))))))))))
+    (let* ((force (equal option 16))
+           (add-new (equal option 4))
+           (collections (or (and (not force) research--collections)
+                            (setq research--collections
+                                  (research--save
+                                   research-cols-file
+                                   (mapcar (lambda (col)
+                                             `(,(research--repo-name col) . ,col))
+                                           (let ((repos (mapcar
+                                                         (aio-lambda (rcp)
+                                                           (aio-await (research--get-collections rcp)))
+                                                         research--rcps)))
+                                             (aio-await (aio-all repos))
+                                             (apply #'nconc (mapcar #'aio-wait-for repos)))))))))
+      (setq research--inuse-collections
+            (append
+             (when add-new research--inuse-collections)
+             `(,(research--comp-read
+                 (format "%s Collection [%s]: "
+                         (cond (add-new "Add")
+                               (t ""))
+                         (mapcar #'research--repo-name research--inuse-collections))
+                 (if (vectorp collections) (append collections nil) collections)
+                 :require-match t
+                 :initial-input
+                 (when (and (not research--collections)
+                            (executable-find "SourceControl.Git.ShellAdapter"))
+                   (aio-await (research--shell "SourceControl.Git.ShellAdapter GetOfficialBranch"))))))))))
 
 (defvar research--repo-orgs nil)
 (defvar research--repo-projects nil)
@@ -555,7 +558,7 @@ Return at most MAX-RESULT items.")
                              "POST" "/_apis/search/advancedCodeSearchResults"
                              :query '((api-version . "6.0-preview.1"))
                              :payload `( :$top ,max-result
-                                         :$skip ,(* (1- page) max-result)
+                                         :$skip ,(* (max 0 (1- page)) max-result)
                                          :searchText ,query
                                          :filters ( :project [,project]
                                                     :repository [,repo]
@@ -665,22 +668,23 @@ Return at most MAX-RESULT items.")
 ;;;###autoload
 (cl-defun research-query (&key query page prefix hint)
   "Query QUERY to research server with page PAGE and query prefix PREFIX.
-The PAGE can be input using prefix arg.
+The PAGE can be input using prefix arg, negative value will force re-authentication.
 The HINT will be used when there's no query specified."
   (interactive)
   (aio-with-async
-    (-let* ((query (cond
+    (-let* ((prefix-val (prefix-numeric-value current-prefix-arg))
+            (query (cond
                     (query (let ((query (concat prefix query)))
                              (push query research--query-history)
                              query))
-                    (current-prefix-arg (car research--query-history))
+                    ((and current-prefix-arg (<= 0 prefix-val)) (car research--query-history))
                     (t (research--comp-read "Query: " nil
                                             :initial-input (concat prefix
                                                                    (or hint (thing-at-point 'symbol)))
                                             :history 'research--query-history))))
             (cols (or research--inuse-collections
                       (aio-await (research-set-collection))))
-            (page (or page (prefix-numeric-value current-prefix-arg)))
+            (page (or page prefix-val))
             (results (aio-await (research--query-1 cols query page)))
             ((promise result) (aio-await (research--show-query-result results))))
       (while t
