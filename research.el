@@ -323,7 +323,6 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                    (research--request "GET" (format "/%s/_apis/search/status/repositories/%s"
                                                     (research--encode-url project)
                                                     (research--encode-url repo))
-                                      :query '((api-version . "6.0-preview.1"))
                                       :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
                                       :forge 'azdev)))
             ((&plist :id :indexedBranches indexed-branches) col))
@@ -414,7 +413,6 @@ into query list target."
                    (aio-await (research--shell "SourceControl.Git.ShellAdapter GetOfficialBranch"))))))))))
 
 (defvar research--repo-orgs nil)
-(defvar research--repo-projects nil)
 
 (aio-defun research--add-recipe (recipe)
   "Add repository with RECIPE into search collections."
@@ -432,14 +430,20 @@ into query list target."
 (cl-defmethod research--add-repo ((_type (eql 'azdev)))
   (aio-with-async
     (let* ((org (research--comp-read "Org: " nil :history 'research--repo-orgs))
-           (project (research--comp-read "Project: " nil :history 'research--repo-projects))
+           (project (research--comp-read
+                     "Project: "
+                     (mapcar (-rpartial #'plist-get :name)
+                             (-> (aio-await (research--request
+                                             "GET" "/_apis/projects"
+                                             :host (format "dev.azure.com/%s" (research--encode-url org))
+                                             :forge 'azdev))
+                                 (plist-get :value)))))
            (repo (research--comp-read
                   "Repository: "
                   (mapcar (-rpartial #'plist-get :name)
                           (-> (aio-await (research--request
                                           "GET" (format "/%s/_apis/git/repositories"
                                                         (research--encode-url project))
-                                          :query '((api-version . "6.0"))
                                           :host (format "dev.azure.com/%s" (research--encode-url org))
                                           :forge 'azdev))
                               (plist-get :value))))))
