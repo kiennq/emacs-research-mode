@@ -136,7 +136,7 @@
               (path (let ((raw-path (car (url-path-and-query urlobj))))
                       (if (> (length raw-path) 0) raw-path "/")))
               (pred2 (not (url-cookie-retrieve domain path 'secure)))
-              (url (aio-wait-for (research--url-get-available url))))
+              (url (or (aio-wait-for (research--url-get-available url)) url)))
     (read-from-minibuffer
      (format "The current cookies need refresh. Press ENTER to open %s for verification." url))
     (browse-url url)
