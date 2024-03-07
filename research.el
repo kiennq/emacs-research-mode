@@ -62,6 +62,22 @@
 
 (declare-function evil-set-command-property "ext:evil-common")
 
+(defmacro research-destruct (&rest structs)
+  "Generate methods that allow to use STRUCTS in dash bindings."
+  (with-case-table ascii-case-table
+    (->> structs
+         (-map (lambda (struct)
+                 (cl-list*
+                  `(defun ,(intern (format "dash-expand:&%s" struct)) (key source)
+                     (let ((f (intern (format "%s-%s"
+                                              ,(symbol-name struct)
+                                              (substring (symbol-name key) 1)))))
+                     `(,f ,source))))))
+         (macroexp-progn))))
+
+(eval-and-compile
+  (research-destruct url))
+
 ;; AzureDevOps
 (cl-defmethod ghub--username (_host (_forge (eql 'azdev)))
   ""
@@ -84,16 +100,43 @@
   ""
   "cs-github")
 
+(aio-defun research--url-get-available (url)
+  "Get first valid sub-domain of URL."
+  (-let* ((urlobj (url-generic-parse-url url))
+          ((&url :type :host) urlobj)
+          (check-url (aio-lambda (url)
+                       (-> (list (aio-url-retrieve url)
+                                 (aio-sleep 1 '((:error 408))))
+                           (aio-make-select)
+                           (aio-select)
+                           (aio-await)
+                           (aio-await))))
+          (((&plist :error) . _) (->> (format "%s://%s" type host)
+                                      (funcall check-url)
+                                      (aio-await))))
+    (while error
+      (setq host (-some->> (string-search "." host) (+ 1) (substring host)))
+      (setq error (-> (funcall check-url (format "%s://%s" type host))
+                      (aio-await)
+                      (car)
+                      (plist-get :error))))
+    (when host
+      (setf (url-host urlobj) host)
+      (url-recreate-url urlobj))))
+
 (cl-defmethod ghub--auth (host (_auth (eql 'cookie)) _user _forge)
   "Authentication header with HOST using cookie."
   (when-let* ((pred1 url-setup-done)
               (default-exp "12/31/2099")
+              ;; (url (format "https://%s" host))
               (url (format "https://%s" host))
               (urlobj (url-generic-parse-url url))
               (host (url-host urlobj))
+              (domain (url-domain urlobj))
               (path (let ((raw-path (car (url-path-and-query urlobj))))
                       (if (> (length raw-path) 0) raw-path "/")))
-              (pred2 (not (url-cookie-retrieve host path 'secure))))
+              (pred2 (not (url-cookie-retrieve domain path 'secure)))
+              (url (aio-wait-for (research--url-get-available url))))
     (read-from-minibuffer
      (format "The current cookies need refresh. Press ENTER to open %s for verification." url))
     (browse-url url)
@@ -112,7 +155,7 @@
                                        (_ (format "%s" expirationDate)))
                                      domain path secure)))))
     ;; Mark the host cookies have been imported
-    (url-cookie-store "__imported_" "1" default-exp host path 'secure)
+    (url-cookie-store "__imported_" "1" default-exp domain path 'secure)
     (setq url-cookies-changed-since-last-save t)
     (url-cookie-write-file))
   '("Authorization" . ""))
@@ -170,18 +213,6 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
     (write-region (prin1-to-string obj) nil file nil :silent)
     obj))
 
-(defmacro research-destruct (&rest structs)
-  (with-case-table ascii-case-table
-    (->> structs
-         (-map (lambda (struct)
-                 (cl-list*
-                  `(defun ,(intern (format "dash-expand:&%s" struct)) (key source)
-                     (let ((f (intern (format "%s-%s"
-                                              ,(symbol-name struct)
-                                              (substring (symbol-name key) 1)))))
-                     `(,f ,source))))))
-         (macroexp-progn))))
-
 (cl-defgeneric research--refresh-auth (_host _auth _forge)
   "Try to re-authenticate for HOST with AUTH method of FORGE."
   nil)
@@ -194,7 +225,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
               (path (let ((raw-path (car (url-path-and-query urlobj))))
                       (if (> (length raw-path) 0) raw-path "/")))
               (domain (url-domain urlobj))
-              (has-domain? (url-cookie-retrieve host path 'secure)))
+              (has-domain? (url-cookie-retrieve domain path 'secure)))
     (url-cookie-delete-cookies domain)
     t))
 
