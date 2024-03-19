@@ -325,7 +325,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
   (name nil :documentation "Display name." :read-only t)
   ;; rcp can contain empty data, dont rely on it
   (rcp nil :read-only t)
-  (root nil :documentation "The path to repo's code.")
+  (root nil :documentation "Alist map from path prefixes to storage paths.")
   (skip-calc-pos t))
 
 (cl-defstruct (research--az-repo (:constructor research--az-repo-new)
@@ -1017,27 +1017,36 @@ Optionally open ignore cache with FORCE."
           default-directory)
     default-directory))
 
-(aio-defun research--get-project-root (repo)
-  "Get project root for REPO."
+(aio-defun research--get-project-root (repo &optional prefix add?)
+  "Get project REPO root for PREFIX path."
   (let ((root (read-directory-name
                (format "root [%s]: " (research--repo-name repo))
-               (aio-await (research--get-git-toplevel)))))
-    (setf (research--repo-root repo) root)))
+               (aio-await (research--get-git-toplevel))))
+        (prefix (or prefix "/")))
+    (setf (research--repo-root repo)
+          (if (not add?) `((,prefix . ,root))
+            (cons `(,prefix . ,root) (research--repo-root repo))))))
 
 ;;;###autoload
-(defun research-get-project-root ()
-  "Get current project root."
-  (interactive)
-  (mapc (aio-lambda (collection)
-          (aio-await (research--get-project-root collection)))
-        research--inuse-collections))
+(defun research-set-project-root (repo &optional prefix)
+  "Set path for PREFIX of REPO.
+- \\[[universal-argument]] \\[researse-set-project-root] will add prefix instead."
+  (interactive (list (research--comp-read
+                      "Collection: "
+                      (mapcar (lambda (col) `(,(research--repo-name col) . ,col))
+                              research--inuse-collections)
+                      :require-match t)
+                     (read-from-minibuffer "Prefix: ")))
+  (aio-with-async (aio-await (research--get-project-root repo prefix current-prefix-arg))))
 
 (aio-defun research--convert-to-local-path (path repo)
   "Convert PATH to local path for REPO."
-  (concat (or (research--repo-root repo)
-              (aio-await (research--get-project-root repo)))
-          "/"
-          path))
+  (-let [(prefix . root)
+         (-first (-lambda ((prefix . _))
+                   (string-prefix-p prefix path))
+                 (or (research--repo-root repo)
+                     (aio-await (research--get-project-root repo))))]
+    (concat (directory-file-name root) "/" (substring path (length prefix)))))
 
 (defun research--get-skip-calc-pos (repo)
   "Ask for skip calculating true position for REPO."
@@ -1113,9 +1122,12 @@ Optionally open ignore cache with FORCE."
       (-let* ((path (-some->> research--inuse-collections
                       (--map (or (research--repo-root it)
                                  (aio-wait-for (research--get-project-root it))))
-                      (--first (string-prefix-p it buffer-file-name))
-                      (funcall (lambda (s)
-                                 (substring buffer-file-name (length s))))))
+                      (-flatten)
+                      (--first (string-prefix-p (cdr it) buffer-file-name))
+                      (funcall (-lambda ((prefix . root))
+                                 (concat prefix (substring buffer-file-name
+                                                           ;; Need `+1` for the final `/`
+                                                           (+ (length (directory-file-name root)) 1)))))))
               (query (if path (format "path:%s" path)
                        (format "file:%s" (file-name-nondirectory buffer-file-name))))
               (results (aio-await (research-query :query query :page 1)))
