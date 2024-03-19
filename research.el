@@ -307,14 +307,14 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
   (org)
   (repo))
 
-(cl-defstruct (research--az-rcp (:constructor research--az-rcp-new (&key org project repo))
+(cl-defstruct (research--az-rcp (:constructor make-research--az-rcp (&key org project repo &allow-other-keys))
                                 (:include research--rcp (id (substring-no-properties
                                                              (format "AzDev/%s/%s/%s" org
                                                                      (or project "_")
                                                                      (or repo "_"))))))
   (project))
 
-(cl-defstruct (research--gh-rcp (:constructor research--gh-rcp-new (&key org repo))
+(cl-defstruct (research--gh-rcp (:constructor make-research--gh-rcp (&key org repo &allow-other-keys))
                                 (:include research--rcp (id (substring-no-properties
                                                              (format "GitHub/%s/%s" org
                                                                      (or repo "_")))))))
@@ -327,12 +327,10 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
   (root nil :documentation "Alist map from path prefixes to storage paths.")
   (skip-calc-pos t))
 
-(cl-defstruct (research--az-repo (:constructor research--az-repo-new)
-                                 (:include research--repo))
+(cl-defstruct (research--az-repo (:include research--repo))
   (branch))
 
-(cl-defstruct (research--gh-repo (:constructor research--gh-repo-new)
-                                 (:include research--repo)))
+(cl-defstruct (research--gh-repo (:include research--repo)))
 
 (eval-and-compile
   (research-destruct research--rcp
@@ -363,23 +361,23 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                                      :forge 'azdev)))
             ((&plist :indexedBranches indexed-branches) col))
       (nconc
-       `(,(let ((rcp (research--az-rcp-new :org org)))
-            (research--az-repo-new
+       `(,(let ((rcp (make-research--az-rcp :org org)))
+            (make-research--az-repo
              :name (substring-no-properties (research--az-rcp-id rcp))
              :rcp rcp
              :skip-calc-pos 'undefined))
-         ,(let ((rcp (research--az-rcp-new :org org :project project)))
-            (research--az-repo-new
+         ,(let ((rcp (make-research--az-rcp :org org :project project)))
+            (make-research--az-repo
              :name (substring-no-properties (research--az-rcp-id rcp))
              :rcp rcp
              :skip-calc-pos 'undefined)))
        (when (> (length indexed-branches) 1)
-         `(,(research--az-repo-new
+         `(,(make-research--az-repo
              :name (substring-no-properties (format "%s" rcp-id))
              :rcp repo-rcp
              :skip-calc-pos 'undefined)))
        (mapcar (-lambda ((&plist :name branch))
-                 (research--az-repo-new
+                 (make-research--az-repo
                   :name (substring-no-properties (format "%s/%s" rcp-id branch))
                   :rcp repo-rcp
                   :skip-calc-pos 'undefined
@@ -398,7 +396,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                                      :forge 'github)))
             ((&plist :items) col))
       (mapcar (-lambda ((&plist :id _))
-                (research--gh-repo-new
+                (make-research--gh-repo
                  :name (substring-no-properties (format "%s" rcp-id))
                  :skip-calc-pos 'undefined
                  :rcp repo-rcp))
@@ -416,7 +414,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 ;;                                           :forge 'cs-github)))
 ;;                  ((&plist :RepoID id) col))
 ;;       (list
-;;        (research--gh-repo-new
+;;        (make-research--gh-repo
 ;;         :name (format "GitHub/%s/%s" org repo)
 ;;         :id id
 ;;         :skip-calc-pos 'undefined
@@ -500,7 +498,7 @@ into query list target."
                                           :forge 'azdev))
                               (plist-get :value))))))
       (aio-await (research--add-recipe
-                  (research--az-rcp-new :org org :project project :repo repo))))))
+                  (make-research--az-rcp :org org :project project :repo repo))))))
 
 (cl-defmethod research--add-repo ((_type (eql 'github)))
   (aio-with-async
@@ -516,7 +514,7 @@ into query list target."
                                           :host "api.github.com"))
                               (plist-get :items))))))
     (aio-await (research--add-recipe
-                (research--gh-rcp-new :org org :repo repo))))))
+                (make-research--gh-rcp :org org :repo repo))))))
 
 ;;;###autoload
 (defun research-add-repo (type)
@@ -557,14 +555,12 @@ into query list target."
   (repo-metadata)
   (matches nil :type list :documentation "List of offsets"))
 
-(cl-defstruct (research--az-code-result (:constructor research--az-code-result-new)
-                                        (:include research--code-result))
+(cl-defstruct (research--az-code-result (:include research--code-result))
   (project)
   (content-id nil)
   (type nil))
 
-(cl-defstruct (research--gh-code-result (:constructor research--gh-code-result-new)
-                                        (:include research--code-result)))
+(cl-defstruct (research--gh-code-result (:include research--code-result)))
 
 (eval-and-compile
   (research-destruct research--code-result
@@ -629,7 +625,7 @@ Return at most MAX-RESULT items.")
                                              :repository (&plist :name repo)
                                              :project (&plist :name proj)
                                              :matches :repository))
-                             (research--az-code-result-new
+                             (make-research--az-code-result
                               :path path
                               :url (format "https://dev.azure.com/%s/%s/_git/%s?path=%s&version=GB%s"
                                            (research--encode-url org)
@@ -650,7 +646,7 @@ Return at most MAX-RESULT items.")
       (research--show-info info)
       files)))
 
-(cl-defstruct (research--frag-pos (:constructor research--frag-pos-new))
+(cl-defstruct (research--frag-pos)
   (fragment nil :type string)
   (offset nil :type number))
 
@@ -678,7 +674,7 @@ Return at most MAX-RESULT items.")
 ;;                                    :repository (&plist :id cur-id)
 ;;                                    :text_matches matches))
 ;;                    (when (equal repo-id cur-id)
-;;                      (research--gh-code-result-new
+;;                      (make-research--gh-code-result
 ;;                       :path path
 ;;                       :url url
 ;;                       :id sha
@@ -686,7 +682,7 @@ Return at most MAX-RESULT items.")
 ;;                       :matches (apply #'nconc
 ;;                                       (mapcar (-lambda ((&plist :fragment :matches))
 ;;                                                 (mapcar (-lambda ((&plist :indices [start _]))
-;;                                                           (research--frag-pos-new
+;;                                                           (make-research--frag-pos
 ;;                                                            :fragment fragment
 ;;                                                            :offset start))
 ;;                                                         matches))
@@ -715,7 +711,7 @@ Return at most MAX-RESULT items.")
                                    :repo_nwo
                                    :repo_id
                                    :term_matches))
-                   (research--gh-code-result-new
+                   (make-research--gh-code-result
                     :path path
                     :url (format "https://github.com/%s/blob/%s/%s"
                                  repo_nwo
@@ -731,8 +727,8 @@ Return at most MAX-RESULT items.")
 ;;;###autoload
 (cl-defun research-query (&key query page prefix hint)
   "Query QUERY to research server with page PAGE and query prefix PREFIX.
-The PAGE can be input using prefix arg, negative value will force re-authentication.
-The HINT will be used when there's no query specified."
+The PAGE can be input using prefix arg, negative value will force
+re-authentication.  The HINT will be used when there's no query specified."
   (interactive)
   (aio-with-async
     (-let* ((prefix-val (prefix-numeric-value current-prefix-arg))
