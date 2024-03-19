@@ -11,7 +11,6 @@
 ;; This file is NOT part of GNU Emacs.
 
 ;;; Commentary:
-;; This package only works in Windows (or WSL)
 ;;; Code:
 
 (require 'pulse)

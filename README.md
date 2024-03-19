@@ -1,8 +1,8 @@
 Code search integration for `Emacs`
 =================================
 
-`research.el` is an `Emacs`'s plugin that can be used for code searching on `Azure DevOps` and `GitHub` repo.
-Support for other forges integration are now under development.
+`research.el` is an `Emacs` plugin that can be used for code searching in `Azure DevOps` and `GitHub` repositories.
+Support for integration with other forges is currently under development.
 
 ![research in action](./images/demo_add_repo_and_query.gif)
 
@@ -18,11 +18,12 @@ Via [`Quelpa`](https://github.com/quelpa/quelpa)
                    :url "git@github.com:kiennq/emacs-research-mode.git"))
 ```
 
-You will need personal access tokens (PATs) to query for the code search result.
-After getting your PATs, you can save them into `~/.authinfo` file (or `~/.authinfo.gpg` as encryted file).
-The user name should be set to:
+## Using personal access token (PAT)
+You can use personal access tokens (PATs) to query the code search results.
+After obtaining your PATs, you can save them into the `~/.authinfo` file (or `~/.authinfo.gpg` as an encrypted file).
+The username should be set to:
 - `azdev^token` for `Azure DevOps`
-- `<account>^token` for others
+- `<account>^token` for other services
 
 For example:
 
@@ -32,7 +33,16 @@ machine dev.azure.com/<org> login azdev^token password <PAT>
 machine api.github.com login <account>^token password <PAT>
 ```
 
-After that, you can start playing around with this plugin.
+Afterward, you can start exploring this plugin.
+
+## Using cookie
+If you prefer not to set up PATs, an alternative method is to authenticate via a browser and then transfer the cookie to Emacs.
+
+``` emacs-lisp
+(setq research-default-auth-method 'cookie)
+```
+
+The cookie from browswer can be obtained by using [Cookie-Editor](https://cookie-editor.com/).
 
 # Sample setup
 
@@ -60,9 +70,13 @@ After that, you can start playing around with this plugin.
 ```
 
 # For development
-`research.el` has some extension functions that can be used to add support for other forges.
+`research.el` includes several extension functions that can be utilized to add support for other forges.
 
 ``` emacs-lisp
+(cl-defgeneric research--refresh-auth (_host _auth _forge)
+  "Try to re-authenticate for HOST with AUTH method of FORGE."
+  nil)
+
 (cl-defgeneric research--get-collections ((repo-rcp research--rcp))
   "Get collections of REPO-RCP.")
 
@@ -73,6 +87,9 @@ After that, you can start playing around with this plugin.
   "Query QUERY to repository REPO with page PAGE.
 Return at most MAX-RESULT items.")
 
+(cl-defgeneric research--buf-pos (pos)
+  "Calculate the position in current buffer from POS.")
+
 (cl-defgeneric research--load-file ((file research--code-result))
   "Load the remote FILE.")
 
@@ -81,29 +98,32 @@ Return at most MAX-RESULT items.")
   "Return the current buffer file url with LINE information included.")
 ```
 
-It also contains few structs that can be used to store the return data from them.
+It also features several structs that can be employed to store the returned data from these functions.
 
 ``` emacs-lisp
 (cl-defstruct research--rcp
   "Recipe for the repository."
+  (id)
   (org)
   (repo))
 
 (cl-defstruct research--repo
   "Base type for the repository that we search on."
-  (name nil :document "Display name." :read-only t)
-  (id)
+  (name nil :documentation "Display name." :read-only t)
+  ;; rcp can contain empty data, dont rely on it
   (rcp nil :read-only t)
-  (root nil :document "The path to repo's code.")
-  (skip-calc-pos 'none))
+  (root nil :documentation "Alist map from path prefixes to storage paths.")
+  (skip-calc-pos t))
 
 (cl-defstruct research--code-result
   "The code result"
-  (path nil :document "Path to current result.")
-  (url nil :document "URL to the current result.")
-  (id nil :document "Version id.")
-  (repo nil)
-  (matches nil :type list :document "List of offsets"))
+  (path nil :documentation "Path to current result.")
+  (url nil :documentation "URL to the current result.")
+  (id nil :documentation "Version id.")
+  (org)
+  (repo)
+  (repo-metadata)
+  (matches nil :type list :documentation "List of offsets"))
 ```
 
-When adding support for a new forge, we should create a new type that inherits the listed base type, then create a new implementation for the generic functions.
+When adding support for a new forge, you should create a new type that inherits from the listed base types and then implement the generic functions accordingly.
