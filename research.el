@@ -6,7 +6,7 @@
 ;; Maintainer: Park Jiin; Kien Nguyen
 ;; Version: 3.1
 ;; Keywords: research, source
-;; Package-Requires: ((emacs "26.1") (aio "1.0") (dash "2.19.1") (ghub))
+;; Package-Requires: ((emacs "27.1") (aio "1.0") (dash "2.19.1") (ghub))
 
 ;; This file is NOT part of GNU Emacs.
 
