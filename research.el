@@ -103,6 +103,7 @@
   "Get first valid sub-domain of URL."
   (-let* ((urlobj (url-generic-parse-url url))
           ((&url :type :host) urlobj)
+          (url-request-method "GET")
           (check-url (aio-lambda (url)
                        (-> (list (aio-url-retrieve url)
                                  (aio-sleep 1 '((:error 408))))
@@ -113,7 +114,7 @@
           (((&plist :error) . _) (->> (format "%s://%s" type host)
                                       (funcall check-url)
                                       (aio-await))))
-    (while error
+    (while (and error (not (member (cl-third error) '(406))))
       (setq host (-some->> (string-search "." host) (+ 1) (substring host)))
       (setq error (-> (funcall check-url (format "%s://%s" type host))
                       (aio-await)
@@ -1017,7 +1018,7 @@ Optionally open ignore cache with FORCE."
   (let ((root (read-directory-name
                (format "root [%s]: " (research--repo-name repo))
                (aio-await (research--get-git-toplevel))))
-        (prefix (or prefix "/")))
+        (prefix (or prefix "")))
     (setf (research--repo-root repo)
           (if (not add?) `((,prefix . ,root))
             (cons `(,prefix . ,root) (research--repo-root repo))))))
