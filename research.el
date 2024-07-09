@@ -787,6 +787,7 @@ re-authentication.  The HINT will be used when there's no query specified."
           (+ pos 1)
         (let ((name buffer-file-name)
               (inhibit-eol-conversion t)
+              (auto-coding-functions nil)
               (r-count 0)
               (pos (max pos (point-min))))
           (with-temp-buffer
