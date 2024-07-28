@@ -327,8 +327,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
   (name nil :documentation "Display name." :read-only t)
   ;; rcp can contain empty data, dont rely on it
   (rcp nil :read-only t)
-  (root nil :documentation "Alist map from path prefixes to storage paths.")
-  (skip-calc-pos t))
+  (root nil :documentation "Alist map from path prefixes to storage paths."))
 
 (cl-defstruct (research--az-repo (:include research--repo))
   (branch))
@@ -367,23 +366,19 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
        `(,(let ((rcp (make-research--az-rcp :org org)))
             (make-research--az-repo
              :name (substring-no-properties (research--az-rcp-id rcp))
-             :rcp rcp
-             :skip-calc-pos 'undefined))
+             :rcp rcp))
          ,(let ((rcp (make-research--az-rcp :org org :project project)))
             (make-research--az-repo
              :name (substring-no-properties (research--az-rcp-id rcp))
-             :rcp rcp
-             :skip-calc-pos 'undefined)))
+             :rcp rcp)))
        (when (> (length indexed-branches) 1)
          `(,(make-research--az-repo
              :name (substring-no-properties (format "%s" rcp-id))
-             :rcp repo-rcp
-             :skip-calc-pos 'undefined)))
+             :rcp repo-rcp)))
        (mapcar (-lambda ((&plist :name branch))
                  (make-research--az-repo
                   :name (substring-no-properties (format "%s/%s" rcp-id branch))
                   :rcp repo-rcp
-                  :skip-calc-pos 'undefined
                   :branch branch))
                indexed-branches)))))
 
@@ -401,7 +396,6 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
       (mapcar (-lambda ((&plist :id _))
                 (make-research--gh-repo
                  :name (substring-no-properties (format "%s" rcp-id))
-                 :skip-calc-pos 'undefined
                  :rcp repo-rcp))
               items))))
 
@@ -420,7 +414,6 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 ;;        (make-research--gh-repo
 ;;         :name (format "GitHub/%s/%s" org repo)
 ;;         :id id
-;;         :skip-calc-pos 'undefined
 ;;         :rcp repo-rcp)))))
 
 (defvar research--inuse-collections nil)
@@ -780,24 +773,37 @@ re-authentication.  The HINT will be used when there's no query specified."
 (cl-defgeneric research--buf-pos (pos)
   "Calculate the position in current buffer from POS.")
 
-(defvar-local research--skip-calc-pos? nil)
+(defvar-local research--file-index-eol nil
+  "The EOL of file stored in SVC index.  Can be :crlf or :lf.")
+
+(aio-defun research--file-index-eol (buf)
+  "Get the EOL of BUFFER in SVC index."
+  (when-let ((file (buffer-local-value 'buffer-file-name buf)))
+    (setf (buffer-local-value 'research--file-index-eol buf)
+          (or (buffer-local-value 'research--file-index-eol buf)
+              (let ((default-directory (file-name-directory file)))
+                (pcase (aio-await (research--shell (format "git ls-files %s --format=%%(eolinfo:index)"
+                                                           file)))
+                  ("crlf" :crlf)
+                  (_ :lf)))))))
+
 (cl-defmethod research--buf-pos ((pos number))
-  (if buffer-file-name
-      (if research--skip-calc-pos?
-          (+ pos 1)
-        (let ((name buffer-file-name)
-              (inhibit-eol-conversion t)
-              (auto-coding-functions nil)
-              (r-count 0)
-              (pos (max pos (point-min))))
-          (with-temp-buffer
-            (insert-file-contents name)
-            (save-match-data
-              (goto-char (point-min))
-              (while (search-forward "\r" pos 'bound)
-                (cl-incf r-count)))
-            (- pos r-count -1))))
-    (+ (filepos-to-bufferpos pos) 1)))
+  (let ((buf (current-buffer)))
+    (aio-with-async
+      (let ((eol (aio-await (research--file-index-eol buf))))
+        (with-current-buffer buf
+          (pcase eol
+            (:crlf (cl-labels ((bin-srch (pos beg end)
+                                 (if (> end beg)
+                                     (let ((mid (/ (+ beg end) 2)))
+                                       (let ((cur-pos (+ mid (line-number-at-pos mid 'abs) -1)))
+                                         (cond
+                                          ((= cur-pos pos) mid)
+                                          ((< cur-pos pos) (bin-srch pos (1+ mid) end))
+                                          (t (bin-srch pos beg mid)))))
+                                   beg)))
+                     (1+ (bin-srch pos (point-min) pos))))
+            (:lf (1+ pos))))))))
 
 (cl-defmethod research--buf-pos ((pos research--frag-pos))
   (-let* (((&research--frag-pos :fragment :offset) pos)
@@ -818,19 +824,16 @@ re-authentication.  The HINT will be used when there's no query specified."
 
 (defvar-local research--current-buffer-result nil
   "Store reSearch result of current buffer.
-It's a plist of (:re research--code-result :idx :skip-calc-pos).")
+It's a plist of (:re research--code-result :idx).")
 ;; Make this result permanent-local not cleared when change major mode.
 (put 'research--current-buffer-result 'permanent-local t)
 
-(cl-defun research--save-current-buffer-result (buf result
-                                                    &key
-                                                    pos skip-calc-pos)
-  "BUF RESULT POS SKIP-CALC-POS."
+(cl-defun research--save-current-buffer-result (buf result &key pos)
+  "BUF RESULT POS."
   (with-current-buffer buf
     (setq research--current-buffer-result
           `( :re ,result
-             :idx ,(cl-position pos (research--code-result-matches result)))
-          research--skip-calc-pos? skip-calc-pos)))
+             :idx ,(cl-position pos (research--code-result-matches result))))))
 
 (declare-function ivy-read "ext:ivy")
 (declare-function helm "ext:helm")
@@ -887,26 +890,23 @@ It's a plist of (:re research--code-result :idx :skip-calc-pos).")
   "Jump to RESULT regarding to TYPE as `local', `remote', `remote-force' or `web'."
   (-let* (((&research--code-result :path :url :repo-metadata :matches) result)
           (pos (if (> (length matches) 0) (elt matches 0) 0))
-          skip-calc-pos?
           (buf
            (pcase type
-            ('remote
-             (aio-await (research--load-file-1 result)))
-            ('remote-force
-             (aio-await (research--load-file-1 result 'force)))
-            ('web (browse-url url))
-            (_
-             (let ((local-path (aio-await
-                                (research--convert-to-local-path path repo-metadata))))
-               (if (file-exists-p local-path)
-                   (progn
-                     (setq skip-calc-pos? (research--get-skip-calc-pos repo-metadata))
-                     (find-file-noselect local-path))
-                 (aio-await (research--load-file-1 result))))))))
+             ('remote
+              (aio-await (research--load-file-1 result)))
+             ('remote-force
+              (aio-await (research--load-file-1 result 'force)))
+             ('web (browse-url url))
+             (_
+              (let ((local-path (aio-await
+                                 (research--convert-to-local-path path repo-metadata))))
+                (if (file-exists-p local-path)
+                    (progn
+                      (find-file-noselect local-path))
+                  (aio-await (research--load-file-1 result))))))))
     (when (or (bufferp buf) (stringp buf))
       (research--save-current-buffer-result buf result
-                                            :pos pos
-                                            :skip-calc-pos skip-calc-pos?)
+                                            :pos pos)
       (research--jump-to-pos buf pos))))
 
 ;;;###autoload
@@ -919,8 +919,8 @@ It's a plist of (:re research--code-result :idx :skip-calc-pos).")
                 (not-empty (> (length matches) 0))
                 (next (% (+ (or (plist-get research--current-buffer-result :idx) 0) step)
                          (length matches))))
-      (research--jump-to-pos (current-buffer) (elt matches next))
-      (plist-put research--current-buffer-result :idx next))))
+      (plist-put research--current-buffer-result :idx next)
+      (research--jump-to-pos (current-buffer) (elt matches next)))))
 
 (defsubst research--set-major-mode (&optional file-name buffer)
   "Set major mode based on FILE-NAME or BUFFER information."
@@ -1047,28 +1047,16 @@ Optionally open ignore cache with FORCE."
                      (aio-await (research--get-project-root repo))))]
     (concat (directory-file-name root) "/" (substring path (length prefix)))))
 
-(defun research--get-skip-calc-pos (repo)
-  "Ask for skip calculating true position for REPO."
-  (when (equal (research--repo-skip-calc-pos repo) 'undefined)
-    (setf (research--repo-skip-calc-pos repo)
-          (y-or-n-p (format "Skip calculating true position [%s]? "
-                                 (research--repo-name repo)))))
-  (research--repo-skip-calc-pos repo))
-
-(defun research--jump-to-pos (buffer raw-pos)
+(aio-defun research--jump-to-pos (buffer raw-pos)
   "In buffer BUFFER, jump to true position of RAW-POS."
   (switch-to-buffer buffer)
   (let* ((raw-pos (if (stringp raw-pos) (string-to-number raw-pos) raw-pos))
-         (pos (if (equal raw-pos 0) (point) (research--buf-pos raw-pos))))
+         (pos (if (equal raw-pos 0) (point) (aio-await (research--buf-pos raw-pos)))))
+    (switch-to-buffer buffer)
     (goto-char pos)
     (recenter)
     (when research-pulse-at-cursor
       (pulse-momentary-highlight-one-line pos))))
-
-(defun research--load-local-file (path pos)
-  "PATH POS."
-  (when (file-exists-p path)
-    (research--jump-to-pos (find-file path) pos)))
 
 ;;;###autoload
 (defun research-init ()
