@@ -781,11 +781,16 @@ re-authentication.  The HINT will be used when there's no query specified."
   (when-let ((file (buffer-local-value 'buffer-file-name buf)))
     (setf (buffer-local-value 'research--file-index-eol buf)
           (or (buffer-local-value 'research--file-index-eol buf)
-              (let ((default-directory (file-name-directory file)))
-                (pcase (aio-await (research--shell (format "git ls-files %s --format=%%(eolinfo:index)"
-                                                           file)))
-                  ("crlf" :crlf)
-                  (_ :lf)))))))
+              (pcase (aio-await
+                      (let ((default-directory (file-name-directory file)))
+                        (research--shell
+                         (format "git ls-files %s --format=%%(eolinfo:index)"
+                                 file))))
+                ("crlf" :crlf)
+                ((pred stringp) :lf)
+                ('nil (pcase (coding-system-eol-type (buffer-local-value 'buffer-file-coding-system buf))
+                        (1 :crlf)
+                        (_ :lf))))))))
 
 (cl-defmethod research--buf-pos ((pos number))
   (let ((buf (current-buffer)))
@@ -1004,7 +1009,12 @@ Optionally open ignore cache with FORCE."
             (setq buffer-file-coding-system 'no-conversion)
             (insert file-content)
             (save-buffer))
-          (let ((coding-system-for-read 'utf-8-auto-dos))
+          (goto-char (point-min))
+          (let ((coding-system-for-read
+                 (if (and (search-forward "\r" (pos-bol 2) t)
+                          (eolp))
+                     'utf-8-auto-dos
+                   'utf-8-auto-unix)))
             (revert-buffer t t))
           (setq buffer-read-only t)
           (current-buffer))))))
