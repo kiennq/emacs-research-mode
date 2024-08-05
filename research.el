@@ -107,7 +107,7 @@
               (url-request-method "GET")
               (check-url (aio-lambda (url)
                            (-> (list (aio-url-retrieve url)
-                                     (aio-sleep 1 '((:error 408))))
+                                     (aio-sleep 1 '((:error '(error http 408)))))
                                (aio-make-select)
                                (aio-select)
                                (aio-await)
@@ -138,7 +138,7 @@
               (path (let ((raw-path (car (url-path-and-query urlobj))))
                       (if (> (length raw-path) 0) raw-path "/")))
               (pred2 (not (url-cookie-retrieve domain path 'secure)))
-              (url (or (aio-wait-for (research--url-get-available url)) url)))
+              (url (or (ignore-errors (aio-wait-for (research--url-get-available url))) url)))
     (read-from-minibuffer
      (format "The current cookies need refresh. Press ENTER to open %s for verification." url))
     (browse-url url)
