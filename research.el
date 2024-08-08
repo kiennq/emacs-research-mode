@@ -800,7 +800,7 @@ re-authentication.  The HINT will be used when there's no query specified."
           (pcase eol
             (:crlf (cl-labels ((bin-srch (pos beg end)
                                  (if (> end beg)
-                                     (let ((mid (/ (+ beg end) 2)))
+                                     (let ((mid (min (/ (+ beg end) 2) (point-max))))
                                        (let ((cur-pos (+ mid (line-number-at-pos mid 'abs) -1)))
                                          (cond
                                           ((= cur-pos pos) mid)
