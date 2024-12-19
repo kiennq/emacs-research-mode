@@ -762,7 +762,7 @@ re-authentication.  The HINT will be used when there's no query specified."
 
 (defun research--show-info (info)
   "Show INFO."
-  (when-let ((msg (research--az-get-info info)))
+  (when-let* ((msg (research--az-get-info info)))
     (run-at-time 0.2 nil
                  (lambda ()
                    (message
@@ -778,7 +778,7 @@ re-authentication.  The HINT will be used when there's no query specified."
 
 (aio-defun research--file-index-eol (buf)
   "Get the EOL of BUFFER in SVC index."
-  (when-let ((file (buffer-local-value 'buffer-file-name buf)))
+  (when-let* ((file (buffer-local-value 'buffer-file-name buf)))
     (setf (buffer-local-value 'research--file-index-eol buf)
           (or (buffer-local-value 'research--file-index-eol buf)
               (pcase (aio-await
@@ -800,14 +800,14 @@ re-authentication.  The HINT will be used when there's no query specified."
           (pcase eol
             (:crlf (cl-labels ((bin-srch (pos beg end)
                                  (if (> end beg)
-                                     (let ((mid (min (/ (+ beg end) 2) (point-max))))
-                                       (let ((cur-pos (+ mid (line-number-at-pos mid 'abs) -1)))
-                                         (cond
-                                          ((= cur-pos pos) mid)
-                                          ((< cur-pos pos) (bin-srch pos (1+ mid) end))
-                                          (t (bin-srch pos beg mid)))))
+                                     (let* ((mid (/ (+ beg end) 2))
+                                            (cur-pos (+ mid (line-number-at-pos mid 'abs) -1)))
+                                       (cond
+                                        ((= cur-pos pos) mid)
+                                        ((< cur-pos pos) (bin-srch pos (1+ mid) end))
+                                        (t (bin-srch pos beg mid))))
                                    beg)))
-                     (1+ (bin-srch pos (point-min) pos))))
+                     (1+ (bin-srch pos (point-min) (min pos (point-max))))))
             (:lf (1+ pos))))))))
 
 (cl-defmethod research--buf-pos ((pos research--frag-pos))
@@ -824,7 +824,7 @@ re-authentication.  The HINT will be used when there's no query specified."
                     (- offset r-count))))
     (goto-char (point-min))
     (search-forward (decode-coding-string fragment 'utf-8-auto-dos 'nocopy) nil 'noerror)
-    (when-let ((m (match-beginning 0)))
+    (when-let* ((m (match-beginning 0)))
       (+ m offset))))
 
 (defvar-local research--current-buffer-result nil
@@ -998,7 +998,7 @@ Optionally open ignore cache with FORCE."
                                   "/" )))
     (if (and (file-exists-p file-name) (not force))
         (find-file-noselect file-name)
-      (when-let ((file-content (aio-await (research--load-file file))))
+      (when-let* ((file-content (aio-await (research--load-file file))))
         (make-directory (file-name-directory file-name) t)
         (with-current-buffer (find-file-noselect file-name)
           (setq buffer-read-only nil)
