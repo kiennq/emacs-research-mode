@@ -283,12 +283,12 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                         (_ (aio-resolve promise (-const nil)))))))
     promise))
 
-(aio-defun research--shell (command)
-  "Asynchronously execute shell command COMMAND and return its output string."
-  (-let ((promise (aio-promise))
-         (buf (generate-new-buffer " *research-shell-command*")))
+(aio-defun research--exec (&rest command)
+  "Asynchronously execute command COMMAND and return its output string."
+  (let ((promise (aio-promise))
+        (buf (generate-new-buffer " *research-shell-command*")))
     (set-process-sentinel
-     (start-process-shell-command "research-shell-command" buf command)
+     (apply #'start-process "research-shell-command" buf command)
      (lambda (proc _signal)
        (when (memq (process-status proc) '(exit signal))
          (with-current-buffer buf
@@ -455,7 +455,7 @@ into query list target."
                  :initial-input
                  (when (and (not research--collections)
                             (executable-find "SourceControl.Git.ShellAdapter"))
-                   (aio-await (research--shell "SourceControl.Git.ShellAdapter GetOfficialBranch"))))))))))
+                   (aio-await (research--exec "SourceControl.Git.ShellAdapter" "GetOfficialBranch"))))))))))
 
 (defvar research--repo-orgs nil)
 
@@ -784,9 +784,8 @@ re-authentication.  The HINT will be used when there's no query specified."
               ;; git ls-files can return multiple files if the file is unmerged
               (pcase (-> (aio-await
                           (let ((default-directory (file-name-directory file)))
-                            (research--shell
-                             (format "git ls-files %s --format=%%(eolinfo:index)"
-                                     file))))
+                            (research--exec
+                             "git" "ls-files" file "--format=%(eolinfo:index)")))
                          split-string
                          car)
                 ("crlf" :crlf)
@@ -1025,7 +1024,7 @@ Optionally open ignore cache with FORCE."
 (aio-defun research--get-git-toplevel ()
   "Get top folder of current git repo."
   (if (executable-find "git")
-      (or (aio-await (research--shell "git rev-parse --show-toplevel"))
+      (or (aio-await (research--exec "git" "rev-parse" "--show-toplevel"))
           default-directory)
     default-directory))
 
