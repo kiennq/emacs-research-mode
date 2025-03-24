@@ -215,11 +215,12 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
     (write-region (prin1-to-string obj) nil file nil :silent)
     obj))
 
-(cl-defgeneric research--refresh-auth (_host _auth _forge)
-  "Try to re-authenticate for HOST with AUTH method of FORGE."
+(cl-defgeneric research--clear-auth (_host _auth _forge)
+  "Try to re-authenticate for HOST with AUTH method of FORGE.
+Return non-nil on success."
   nil)
 
-(cl-defmethod research--refresh-auth (host (_auth (eql 'cookie)) _forge)
+(cl-defmethod research--clear-auth (host (_auth (eql 'cookie)) _forge)
   "Try to re-authenticate via cookie for HOST of FORGE."
   (when-let* ((url (format "https://%s" host))
               (urlobj (url-generic-parse-url url))
@@ -242,7 +243,8 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
         (ghub-json-false-object nil)
         (auth (or auth research-default-auth-method 'token)))
     (when (> 0 (prefix-numeric-value current-prefix-arg))
-      (research--refresh-auth host auth forge))
+      (research--clear-auth host auth forge)
+      (setq current-prefix-arg nil))
     (ghub-request method resource nil
                   :query query
                   :payload payload
@@ -266,7 +268,7 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
                       (message "%s::%s" (propertize "Research" 'face 'error) err)
                       (pcase err-code
                         ((or 401 404 500)
-                         (if (research--refresh-auth host auth forge)
+                         (if (research--clear-auth host auth forge)
                              (aio-with-async
                                (aio-resolve
                                 promise
