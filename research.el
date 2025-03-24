@@ -455,9 +455,9 @@ into query list target."
                  (if (vectorp collections) (append collections nil) collections)
                  :require-match t
                  :initial-input
-                 (when (and (not research--collections)
-                            (executable-find "SourceControl.Git.ShellAdapter"))
-                   (aio-await (research--exec "SourceControl.Git.ShellAdapter" "GetOfficialBranch"))))))))))
+                 (when (not research--collections)
+                   (ignore-errors
+                     (aio-await (research--exec "SourceControl.Git.ShellAdapter" "GetOfficialBranch")))))))))))
 
 (defvar research--repo-orgs nil)
 
@@ -788,6 +788,7 @@ re-authentication.  The HINT will be used when there's no query specified."
                           (let ((default-directory (file-name-directory file)))
                             (research--exec
                              "git" "ls-files" file "--format=%(eolinfo:index)")))
+                         (ignore-errors)
                          split-string
                          car)
                 ("crlf" :crlf)
@@ -1025,32 +1026,32 @@ Optionally open ignore cache with FORCE."
 
 (aio-defun research--get-git-toplevel ()
   "Get top folder of current git repo."
-  (if (executable-find "git")
-      (or (aio-await (research--exec "git" "rev-parse" "--show-toplevel"))
-          default-directory)
-    default-directory))
+  (condition-case nil
+      (aio-await (research--exec "git" "rev-parse" "--show-toplevel"))
+    (error default-directory)))
 
-(aio-defun research--get-project-root (repo &optional prefix add?)
-  "Get project REPO root for PREFIX path."
-  (let ((root (read-directory-name
-               (format "root [%s]: " (research--repo-name repo))
-               (aio-await (research--get-git-toplevel))))
-        (prefix (or prefix "")))
+(aio-defun research--get-project-root (repo &optional path-prefix add?)
+  "Get project REPO root for PATH-PREFIX path."
+  (let* ((git-toplevel (aio-await (research--get-git-toplevel)))
+         (root (read-directory-name
+                (format "root [%s]: " (research--repo-name repo))
+                git-toplevel))
+         (path-prefix (or path-prefix "")))
     (setf (research--repo-root repo)
-          (if (not add?) `((,prefix . ,root))
-            (cons `(,prefix . ,root) (research--repo-root repo))))))
+          (if (not add?) `((,path-prefix . ,root))
+            (cons `(,path-prefix . ,root) (research--repo-root repo))))))
 
 ;;;###autoload
-(defun research-set-project-root (repo &optional prefix)
-  "Set path for PREFIX of REPO.
+(defun research-set-project-root (repo &optional path-prefix)
+  "Set path for PATH-PREFIX of REPO.
 - \\[[universal-argument]] \\[researse-set-project-root] will add prefix instead."
   (interactive (list (research--comp-read
                       "Collection: "
                       (mapcar (lambda (col) `(,(research--repo-name col) . ,col))
                               research--inuse-collections)
                       :require-match t)
-                     (read-from-minibuffer "Prefix: ")))
-  (aio-with-async (aio-await (research--get-project-root repo prefix current-prefix-arg))))
+                     (read-from-minibuffer "Path prefix: ")))
+  (aio-with-async (aio-await (research--get-project-root repo path-prefix current-prefix-arg))))
 
 (aio-defun research--convert-to-local-path (path repo)
   "Convert PATH to local path for REPO."
