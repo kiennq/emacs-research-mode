@@ -755,7 +755,7 @@ re-authentication.  The HINT will be used when there's no query specified."
                       (aio-await (research-set-collection))))
             (page (or page prefix-val))
             (results (aio-await (research--query-1 cols query page))))
-      (research--show-query-result results #'research--jump-to-result))))
+      (aio-await (research--show-query-result results #'research--jump-to-result)))))
 
 (defvar research--query-results nil)
 ;; TODO: Store the current search result in an alist so that we can navigate to next occurrence.
@@ -859,49 +859,51 @@ It's a plist of (:re research--code-result :idx).")
 (declare-function helm-build-sync-source "ext:helm")
 (declare-function helm-make-actions "ext:helm")
 
-(defun research--show-query-result (results action-fn)
-  "Show RESULTS and then execute ACTION-FN on selected item."
+(aio-defun research--show-query-result (results action)
+  "Show RESULTS and then execute ACTION on selected item."
   (research--debug results)
-  ;; `run-at-time' so this will not block
-  (run-at-time
-   0 nil
-   (lambda (collection action-fn)
-     (cond
-      ((bound-and-true-p ivy-mode)
-       (ivy-read (format "pattern [%s]: " (car research--query-history))
-                 collection
-                 :require-match t
-                 :action
-                 `(1
-                   ("o" (lambda (re) (funcall ',action-fn (cdr re) 'local))
-                    "Open local")
-                   ("r" (lambda (re) (funcall ',action-fn (cdr re) 'remote))
-                    "Open remote file")
-                   ("f" (lambda (re) (funcall ',action-fn (cdr re) 'remote-force))
-                    "Open remote force")
-                   ("b" (lambda (re) (funcall ',action-fn (cdr re) 'web))
-                    "Open in browser"))
-                 :caller 'research-results))
-      ((bound-and-true-p helm-mode)
-       (helm
-        :sources (helm-build-sync-source
-                  "ReSearch results:"
-                  :candidates collection
-                  :action (helm-make-actions
-                           "Open local" (lambda (re) (funcall action-fn re 'local))
-                           "Open remote file" (lambda (re) (funcall action-fn re 'remote))
-                           "Open remote force" (lambda (re) (funcall action-fn re 'remote-force))
-                           "Open in browser" (lambda (re) (funcall action-fn re 'web))))
-        :prompt (format "pattern [%s]: " (car research--query-history))
-        :buffer "*helm reSearch*"))
-      (t
-       (let ((re (research--comp-read (format "pattern [%s]: " (car research--query-history))
-                                      collection
-                                      :category 'research
-                                      :require-match t)))
-         (funcall action-fn re 'local)))))
-   (--map (cons (research--code-result-path it) it) results)
-   action-fn))
+
+  ;; switch context to not blocking
+  (aio-await (aio-sleep 0))
+  (let* ((promise (aio-promise))
+         (collection (--map (cons (research--code-result-path it) it) results))
+         (result
+          (cond ((bound-and-true-p ivy-mode)
+                 (ivy-read (format "pattern [%s]: " (car research--query-history))
+                           collection
+                           :require-match t
+                           :action
+                           `(1
+                             ("o" (lambda (re) (funcall ',action (cdr re) 'local))
+                              "Open local")
+                             ("r" (lambda (re) (funcall ',action (cdr re) 'remote))
+                              "Open remote file")
+                             ("f" (lambda (re) (funcall ',action (cdr re) 'remote-force))
+                              "Open remote force")
+                             ("b" (lambda (re) (funcall ',action (cdr re) 'web))
+                              "Open in browser"))
+                           :caller 'research-results))
+                ((bound-and-true-p helm-mode)
+                 (helm
+                  :sources (helm-build-sync-source
+                            "ReSearch results:"
+                            :candidates collection
+                            :action (helm-make-actions
+                                     "Open local" (lambda (re) (funcall action re 'local))
+                                     "Open remote file" (lambda (re) (funcall action re 'remote))
+                                     "Open remote force" (lambda (re) (funcall action re 'remote-force))
+                                     "Open in browser" (lambda (re) (funcall action re 'web))))
+                  :prompt (format "pattern [%s]: " (car research--query-history))
+                  :buffer "*helm reSearch*"))
+                (t
+                 (let ((re (research--comp-read (format "pattern [%s]: " (car research--query-history))
+                                                collection
+                                                :category 'research
+                                                :require-match t)))
+                   (funcall action re 'local)
+                   re)))))
+    (aio-resolve promise (-const (alist-get result collection)))
+    (aio-await promise)))
 
 (aio-defun research--jump-to-result (result &optional type)
   "Jump to RESULT regarding to TYPE as `local', `remote', `remote-force' or `web'."
@@ -1046,7 +1048,7 @@ Optionally open ignore cache with FORCE."
          (path-prefix (or path-prefix "")))
     (setf (alist-get repo-id research--roots nil nil 'equal)
           (if (not add?) `((,path-prefix . ,root))
-            (cons `(,path-prefix . ,root) (alist-get repo-id research--roots nil nil 'equal))))))
+            (cons `(,path-prefix . ,root) (alist-get repo-id research--roots nil nil #'equal))))))
 
 ;;;###autoload
 (defun research-set-project-root (repo &optional path-prefix)
@@ -1069,7 +1071,7 @@ prefixes are mapped differently from the repo root."
   (-let [(prefix . root)
          (-first (-lambda ((prefix . _))
                    (string-prefix-p prefix path))
-                 (or (alist-get repo-id research--roots nil nil 'equal)
+                 (or (alist-get repo-id research--roots nil nil #'equal)
                      (aio-await (research--get-project-root repo-id))))]
     (concat (directory-file-name root) "/" (substring path (length prefix)))))
 
@@ -1144,15 +1146,10 @@ prefixes are mapped differently from the repo root."
                                                            (+ (length (directory-file-name root)) 1)))))))
               (query (if path (format "path:%s" path)
                        (format "file:%s" (file-name-nondirectory buffer-file-name))))
-              (results (aio-await (research--query-1 (or research--inuse-collections
-                                                         (aio-await (research-set-collection)))
-                                                     query 1))))
+              (result (aio-await (research-query :query query :page 1))))
         (push query research--query-history)
-        (research--show-query-result results
-                                     (lambda (result &rest _)
-                                       (research--save-current-buffer-result (current-buffer) result)
-                                       (browse-url
-                                        (research--buffer-position-url result (format-mode-line "%l"))))))))
+        (browse-url
+         (research--buffer-position-url result (format-mode-line "%l"))))))
    (t
     (message "No buffer url found! Please open this buffer by reSearch."))))
 
