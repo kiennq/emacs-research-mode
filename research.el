@@ -793,13 +793,14 @@ re-authentication.  The HINT will be used when there's no query specified."
     (setf (buffer-local-value 'research--file-index-eol buf)
           (or (buffer-local-value 'research--file-index-eol buf)
               ;; git ls-files can return multiple files if the file is unmerged
-              (pcase (-> (aio-await
+              (pcase (-some->
+                         (aio-await
                           (let ((default-directory (file-name-directory file)))
                             (research--exec
                              "git" "ls-files" file "--format=%(eolinfo:index)")))
-                         (ignore-errors)
-                         split-string
-                         car)
+                       (ignore-errors)
+                       split-string
+                       car)
                 ("crlf" :crlf)
                 ((pred stringp) :lf)
                 ('nil (pcase (coding-system-eol-type (buffer-local-value 'buffer-file-coding-system buf))
