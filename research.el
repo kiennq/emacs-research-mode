@@ -171,9 +171,13 @@
                                       require-match
                                       history)
   "`completing-read' thats return `cdr' in case collection is an alist.
-HISTORY is the variable that holds input history.
+HISTORY is a list varibale that hold the input history.
 PROMPT COLLECTION CATEGORY PREDICATE INITIAL-INPUT DEFAULT REQUIRE-MATCH."
-  (let* ((collection (delete-dups (append collection (symbol-value history))))
+  (let* ((collection (pcase collection
+                       ((pred sequencep) (delete-dups (append collection (symbol-value history))))
+                       ((pred hash-table-p)
+                        (mapc (lambda (i) (puthash i i collection)) (symbol-value history))
+                        collection)))
          (result (completing-read prompt
                                   (lambda (str pred action)
                                     (cond
@@ -183,7 +187,9 @@ PROMPT COLLECTION CATEGORY PREDICATE INITIAL-INPUT DEFAULT REQUIRE-MATCH."
                                       (complete-with-action action collection str pred))))
                                   predicate require-match initial-input
                                   history default)))
-    (or (cdr (assoc result collection))
+    (or (pcase collection
+          ((pred hash-table-p) (gethash result collection))
+          ((pred listp) (alist-get result collection)))
         result)))
 
 (defsubst research--debug (msg &optional erase? popup?)
@@ -417,6 +423,8 @@ Return non-nil on success."
 ;;         :rcp repo-rcp)))))
 
 (defvar research--inuse-collections nil)
+(defvar research--extra-inuse-collections nil
+  "List of inuse collections but with extra collections at the top.")
 
 ;;;###autoload
 (defun research-set-collection (&optional option)
@@ -434,14 +442,15 @@ into query list target."
                             (setq research--collections
                                   (research--save
                                    research-cols-file
-                                   (mapcar (lambda (col)
-                                             `(,(research--repo-id col) . ,col))
+                                   (let ((cols (make-hash-table :test #'equal)))
+                                     (mapc (lambda (col) (puthash (research--repo-id col) col cols))
                                            (let ((repos (mapcar
                                                          (aio-lambda (rcp)
                                                            (aio-await (research--get-collections rcp)))
                                                          research--rcps)))
                                              (aio-await (aio-all repos))
-                                             (apply #'nconc (mapcar #'aio-wait-for repos)))))))))
+                                             (apply #'nconc (mapcar #'aio-wait-for repos))))
+                                     cols))))))
       (setq research--inuse-collections
             (append
              (when add-new research--inuse-collections)
@@ -455,7 +464,9 @@ into query list target."
                  :initial-input
                  (when (not research--collections)
                    (ignore-errors
-                     (aio-await (research--exec "SourceControl.Git.ShellAdapter" "GetOfficialBranch")))))))))))
+                     (aio-await (research--exec "SourceControl.Git.ShellAdapter" "GetOfficialBranch"))))))))
+      (unless add-new (setq research--extra-inuse-collections research--inuse-collections))
+      research--inuse-collections)))
 
 (defvar research--repo-orgs nil)
 
@@ -464,11 +475,11 @@ into query list target."
   (research--save research-recipes-file
                   (setq research--rcps (add-to-list 'research--rcps recipe)))
   (research--save research-cols-file
-                  (delete-dups
-                   (setq research--collections
-                         (nconc research--collections
-                                (mapcar (lambda (col) `(,(research--repo-id col) . ,col))
-                                        (aio-await (research--get-collections recipe))))))))
+                  (setq research--collections
+                        (let ((cols (or research--collections (make-hash-table :test #'equal))))
+                          (-> (aio-await (research--get-collections recipe))
+                              (mapc (lambda (col) (puthash (research--repo-id col) col cols))))
+                          cols))))
 
 (cl-defgeneric research--add-repo (type)
   "Add a repository of type TYPE into search collections.")
@@ -548,28 +559,16 @@ into query list target."
   (id nil :documentation "Version id.")
   (org)
   (repo)
-  (repo-id)
-  (repo-metadata)
+  (collection)
   (matches nil :type list :documentation "List of offsets"))
 
-(cl-defstruct (research--az-code-result
-               (:constructor make-research--az-code-result (&key path url id org repo repo-metadata matches
-                                                                 project branch content-id type))
-               (:include research--code-result (repo-id (substring-no-properties
-                                                         (format "AzDev/%s/%s/%s/%s" org
-                                                                 (or project "_")
-                                                                 (or repo "_")
-                                                                 (or branch "_"))))))
+(cl-defstruct (research--az-code-result (:include research--code-result))
   (project)
   (branch)
   (content-id nil)
   (type nil))
 
-(cl-defstruct (research--gh-code-result
-               (:constructor make-research--gh-code-result (&key path url id org repo repo-metadata matches))
-               (:include research--code-result (repo-id (substring-no-properties
-                                                         (format "GitHub/%s/%s" org
-                                                                 (or repo "_")))))))
+(cl-defstruct (research--gh-code-result (:include research--code-result)))
 
 (eval-and-compile
   (research-destruct research--code-result
@@ -648,7 +647,6 @@ Return at most MAX-RESULT items.")
                               :project proj
                               :repo repo
                               :branch branch
-                              :repo-metadata collection
                               :matches (mapcar (-rpartial #'plist-get :charOffset)
                                                (plist-get matches :content))
                               :type (plist-get repository :type)))
@@ -730,7 +728,6 @@ Return at most MAX-RESULT items.")
                     :org org
                     :id blob_sha
                     :repo repo_id
-                    :repo-metadata collection
                     :matches (mapcar (-rpartial #'plist-get :start) term_matches)))
                  results)))))
 
@@ -906,9 +903,48 @@ It's a plist of (:re research--code-result :idx).")
     (aio-resolve promise (-const (alist-get result collection)))
     (aio-await promise)))
 
+(cl-defgeneric research--fill-result-data (result)
+  "Fill the missing fiedls in RESULT.")
+
+(cl-defmethod research--fill-result-data ((result research--az-code-result))
+  ""
+  (unless (research--code-result-collection result)
+    (-let* (((&research--az-code-result :org :project :repo :branch) result)
+            (col (or (gethash (format "AzDev/%s/%s/%s/%s" org
+                               (or project "_")
+                               (or repo "_")
+                               (or branch "_"))
+                       research--collections)
+                     (make-research--az-repo :rcp (make-research--az-rcp
+                                                   :org org
+                                                   :project project
+                                                   :repo repo)
+                                             :branch branch))))
+      (setf (research--code-result-collection result) col)
+      (puthash (research--repo-id col) col research--collections)
+      (setq research--extra-inuse-collections
+            (cons col research--extra-inuse-collections)))))
+
+(cl-defmethod research--fill-result-data ((result research--gh-code-result))
+  ""
+  (unless (research--code-result-collection result)
+    (-let* (((&research--gh-code-result :org :repo) result)
+            (col (or (gethash (format "GitHub/%s/%s" org
+                               (or repo "_"))
+                       research--collections)
+                     (make-research--gh-repo :rcp (make-research--gh-rcp
+                                                   :org org
+                                                   :repo repo)))))
+      (setf (research--code-result-collection result) col)
+      (puthash (research--repo-id col) col research--collections)
+      (setq research--extra-inuse-collections
+            (cons col research--extra-inuse-collections)))))
+
 (aio-defun research--jump-to-result (result &optional type)
   "Jump to RESULT regarding to TYPE as `local', `remote', `remote-force' or `web'."
-  (-let* (((&research--code-result :path :url :repo-id :matches) result)
+  (research--fill-result-data result)
+  (-let* (((&research--code-result :path :url :matches
+                                   :collection (&research--repo :id repo-id)) result)
           (pos (if (> (length matches) 0) (elt matches 0) 0))
           (buf
            (pcase type
@@ -999,9 +1035,8 @@ It's a plist of (:re research--code-result :idx).")
 (aio-defun research--load-file-1 (file &optional force)
   "Load the remote FILE.
 Optionally open ignore cache with FORCE."
-  (-let* (((&research--code-result :repo-id
-                                   :path :id)
-           file)
+  (-let* (((&research--code-result :path :id
+                                   :collection (&research--repo :id repo-id)) file)
           (file-name (string-join `(,temporary-file-directory
                                     ,repo-id
                                     ,(concat
@@ -1061,7 +1096,7 @@ prefixes are mapped differently from the repo root."
   (interactive (list (research--comp-read
                       "Collection: "
                       (mapcar (lambda (col) `(,(research--repo-id col) . ,col))
-                              research--inuse-collections)
+                              research--extra-inuse-collections)
                       :require-match t)
                      (read-from-minibuffer "Path prefix: ")))
   (aio-with-async (aio-await (research--get-project-root (research--repo-id repo)
@@ -1099,7 +1134,8 @@ prefixes are mapped differently from the repo root."
 (defun research-exit ()
   "Kill reSearch middleware process."
   (interactive)
-  (setq research--inuse-collections nil))
+  (setq research--inuse-collections nil)
+  (setq research--extra-inuse-collections nil))
 
 ;;;###autoload
 (define-minor-mode research-mode
