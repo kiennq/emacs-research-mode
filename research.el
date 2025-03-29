@@ -355,10 +355,10 @@ Return non-nil on success."
                      research--gh-repo))
 
 (defvar research--rcps nil
-  "Repo's recipres.")
+  "Repo's recipes.")
 
 (defvar research--collections nil
-  "List of cached `research--repo'.")
+  "Hash table of cached `research--repo'.")
 
 (defvar research--roots nil
   "An alist, maps from repo name to its path-prefix root directories.")
@@ -841,7 +841,7 @@ re-authentication.  The HINT will be used when there's no query specified."
 
 (defvar-local research--current-buffer-result nil
   "Store reSearch result of current buffer.
-It's a plist of (:re research--code-result :idx).")
+It's a plist of (:result research--code-result :idx).")
 ;; Make this result permanent-local not cleared when change major mode.
 (put 'research--current-buffer-result 'permanent-local t)
 
@@ -849,7 +849,7 @@ It's a plist of (:re research--code-result :idx).")
   "BUF RESULT POS."
   (with-current-buffer buf
     (setq research--current-buffer-result
-          `( :re ,result
+          `( :result ,result
              :idx ,(cl-position pos (research--code-result-matches result))))))
 
 (declare-function ivy-read "ext:ivy")
@@ -903,46 +903,42 @@ It's a plist of (:re research--code-result :idx).")
     (aio-resolve promise (-const (alist-get result collection)))
     (aio-await promise)))
 
-(cl-defgeneric research--fill-result-data (result)
-  "Fill the missing fiedls in RESULT.")
+(cl-defgeneric research--code-result-get-collection (result)
+  "Get the collection (repo) from RESULT.")
 
-(cl-defmethod research--fill-result-data ((result research--az-code-result))
+(cl-defmethod research--code-result-get-collection ((result research--az-code-result))
   ""
-  (unless (research--code-result-collection result)
-    (-let* (((&research--az-code-result :org :project :repo :branch) result)
-            (col (or (gethash (format "AzDev/%s/%s/%s/%s" org
-                               (or project "_")
-                               (or repo "_")
-                               (or branch "_"))
-                       research--collections)
-                     (make-research--az-repo :rcp (make-research--az-rcp
-                                                   :org org
-                                                   :project project
-                                                   :repo repo)
-                                             :branch branch))))
-      (setf (research--code-result-collection result) col)
-      (puthash (research--repo-id col) col research--collections)
-      (setq research--extra-inuse-collections
-            (cons col research--extra-inuse-collections)))))
+  (-let* (((&research--az-code-result :org :project :repo :branch) result))
+    (or (gethash (format "AzDev/%s/%s/%s/%s" org
+                         (or project "_")
+                         (or repo "_")
+                         (or branch "_"))
+                 research--collections)
+        (make-research--az-repo :rcp (make-research--az-rcp
+                                      :org org
+                                      :project project
+                                      :repo repo)
+                                :branch branch))))
 
-(cl-defmethod research--fill-result-data ((result research--gh-code-result))
+(cl-defmethod research--code-result-get-collection ((result research--gh-code-result))
   ""
-  (unless (research--code-result-collection result)
-    (-let* (((&research--gh-code-result :org :repo) result)
-            (col (or (gethash (format "GitHub/%s/%s" org
-                               (or repo "_"))
-                       research--collections)
-                     (make-research--gh-repo :rcp (make-research--gh-rcp
-                                                   :org org
-                                                   :repo repo)))))
-      (setf (research--code-result-collection result) col)
-      (puthash (research--repo-id col) col research--collections)
-      (setq research--extra-inuse-collections
-            (cons col research--extra-inuse-collections)))))
+  (-let* (((&research--gh-code-result :org :repo) result))
+    (or (gethash (format "GitHub/%s/%s" org
+                         (or repo "_"))
+                 research--collections)
+        (make-research--gh-repo :rcp (make-research--gh-rcp
+                                      :org org
+                                      :repo repo)))))
 
 (aio-defun research--jump-to-result (result &optional type)
   "Jump to RESULT regarding to TYPE as `local', `remote', `remote-force' or `web'."
-  (research--fill-result-data result)
+  (unless (research--code-result-collection result)
+    (let ((col (research--code-result-get-collection result)))
+      (setf (research--code-result-collection result) col)
+      (puthash (research--repo-id col) col research--collections)
+      (setq research--rcps (add-to-list 'research--rcps (research--repo-rcp col)))
+      (setq research--extra-inuse-collections
+            (cons col research--extra-inuse-collections))))
   (-let* (((&research--code-result :path :url :matches
                                    :collection (&research--repo :id repo-id)) result)
           (pos (if (> (length matches) 0) (elt matches 0) 0))
@@ -971,7 +967,7 @@ It's a plist of (:re research--code-result :idx).")
   (interactive "p")
   (when research--current-buffer-result
     (when-let* ((matches (research--code-result-matches
-                          (plist-get research--current-buffer-result :re)))
+                          (plist-get research--current-buffer-result :result)))
                 (not-empty (> (length matches) 0))
                 (next (% (+ (or (plist-get research--current-buffer-result :idx) 0) step)
                          (length matches))))
@@ -1167,7 +1163,7 @@ prefixes are mapped differently from the repo root."
   (cond
    (research--current-buffer-result
     (browse-url
-     (-> (plist-get research--current-buffer-result :re)
+     (-> (plist-get research--current-buffer-result :result)
          (research--buffer-position-url (format-mode-line "%l")))))
    (buffer-file-name
     (aio-with-async
@@ -1199,7 +1195,7 @@ prefixes are mapped differently from the repo root."
     (let ((thing (thing-at-point 'symbol))
           (dir (file-name-directory
                 (research--code-result-path
-                 (plist-get research--current-buffer-result :re)))))
+                 (plist-get research--current-buffer-result :result)))))
       (research-query :query (if thing nil dir)
                       :prefix "path:"
                       :hint (concat dir " " thing))))
