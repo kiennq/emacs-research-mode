@@ -99,46 +99,45 @@
   ""
   "cs-github")
 
-(aio-defun research--url-get-available (url)
-  "Get first valid sub-domain of URL."
-  (condition-case nil
-      (-let* ((urlobj (url-generic-parse-url url))
-              ((&url :type :host) urlobj)
-              (url-request-method "GET")
-              (check-url (aio-lambda (url)
-                           (-> (list (aio-url-retrieve url)
-                                     (aio-sleep 1 '((:error '(error http 408)))))
-                               (aio-make-select)
-                               (aio-select)
-                               (aio-await)
-                               (aio-await))))
-              (((&plist :error) . _) (->> (format "%s://%s" type host)
-                                          (funcall check-url)
-                                          (aio-await))))
-        (while (and error (not (member (cl-third error) '(406 408))))
-          (setq host (-some->> (string-search "." host) (+ 1) (substring host)))
-          (setq error (-> (funcall check-url (format "%s://%s" type host))
-                          (aio-await)
-                          (car)
-                          (plist-get :error))))
-        (when host
-          (setf (url-host urlobj) host)
-          (url-recreate-url urlobj)))
-    (_ url)))
+;; (aio-defun research--url-get-available (url)
+;;   "Get first valid sub-domain of URL."
+;;   (condition-case nil
+;;       (-let* ((urlobj (url-generic-parse-url url))
+;;               ((&url :type :host) urlobj)
+;;               (url-request-method "GET")
+;;               (check-url (aio-lambda (url)
+;;                            (-> (list (aio-url-retrieve url)
+;;                                      (aio-sleep 1 '((:error '(error http 408)))))
+;;                                (aio-make-select)
+;;                                (aio-select)
+;;                                (aio-await)
+;;                                (aio-await))))
+;;               (((&plist :error) . _) (->> (format "%s://%s" type host)
+;;                                           (funcall check-url)
+;;                                           (aio-await))))
+;;         (while (and error (not (member (cl-third error) '(406 408))))
+;;           (setq host (-some->> (string-search "." host) (+ 1) (substring host)))
+;;           (setq error (-> (funcall check-url (format "%s://%s" type host))
+;;                           (aio-await)
+;;                           (car)
+;;                           (plist-get :error))))
+;;         (when host
+;;           (setf (url-host urlobj) host)
+;;           (url-recreate-url urlobj)))
+;;     (_ url)))
 
 (cl-defmethod ghub--auth (host (_auth (eql 'cookie)) _user _forge)
   "Authentication header with HOST using cookie."
   (when-let* ((pred1 url-setup-done)
               (default-exp "12/31/2099")
-              ;; (url (format "https://%s" host))
-              (url (format "https://%s" host))
+              (url (or (get-text-property 0 'url host)
+                       (format "https://%s" host)))
               (urlobj (url-generic-parse-url url))
               (host (url-host urlobj))
               (domain (url-domain urlobj))
               (path (let ((raw-path (car (url-path-and-query urlobj))))
                       (if (> (length raw-path) 0) raw-path "/")))
-              (pred2 (not (url-cookie-retrieve domain path 'secure)))
-              (url (or (ignore-errors (aio-wait-for (research--url-get-available url))) url)))
+              (pred2 (not (url-cookie-retrieve domain path 'secure))))
     (read-from-minibuffer
      (format "The current cookies need refresh. Press ENTER to open %s for verification." url))
     (browse-url url)
@@ -238,9 +237,8 @@ Return non-nil on success."
     (url-cookie-delete-cookies domain)
     t))
 
-;; TODO: create a class/truct so that we can use method specialization defmethod
 (cl-defun research--request (method resource
-                                    &key query payload headers reader auth host forge)
+                                    &key query payload headers reader auth auth-url host forge)
   "Wrapper of `ghub-request' in async form."
   (let ((promise (aio-promise))
         (ghub-json-object-type 'plist)
@@ -257,7 +255,7 @@ Return non-nil on success."
                   :headers headers
                   :reader reader
                   :auth auth
-                  :host host
+                  :host (propertize host 'url auth-url)
                   :forge forge
                   :callback (lambda (result &rest _) (aio-resolve promise (-const result)))
                   :errorback
@@ -375,6 +373,7 @@ Return non-nil on success."
                                                    (research--encode-url project)
                                                    (research--encode-url repo))
                                      :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
+                                     :auth-url (format "https://dev.azure.com/%s" (research--encode-url org))
                                      :forge 'azdev)))
             ((&plist :indexedBranches indexed-branches) col))
       (nconc
@@ -402,6 +401,7 @@ Return non-nil on success."
                                      :headers '(("Accept" . "application/vnd.github.v3+json"))
                                      :query `((q . ,(format "repo:%s/%s fork:true" org repo)))
                                      :host "api.github.com"
+                                     :auth-url "https://github.com"
                                      :forge 'github)))
             ((&plist :items) col))
       (unless (seq-empty-p items)
@@ -518,7 +518,8 @@ into query list target."
                                           :query `((q . ,(format "user:%s fork:true" org))
                                                    (per_page . 100))
                                           :headers '(("Accept" . "application/vnd.github.v3+json"))
-                                          :host "api.github.com"))
+                                          :host "api.github.com"
+                                          :auth-url "https://github.com"))
                               (plist-get :items))))))
     (aio-await (research--add-recipe
                 (make-research--gh-rcp :org org :repo repo))))))
@@ -624,6 +625,7 @@ Return at most MAX-RESULT items.")
                                                     (when rcp-repo `(:repository [,rcp-repo]))
                                                     (when branch `(:branch [,branch]))))
                              :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
+                             :auth-url (format "https://dev.azure.com/%s" (research--encode-url org))
                              :forge 'azdev)))
             ((&plist :results :infoCode info) res)
             (files (mapcar (-lambda ((&plist :path
@@ -755,8 +757,6 @@ re-authentication.  The HINT will be used when there's no query specified."
       (aio-await (research--show-query-result results #'research--jump-to-result)))))
 
 (defvar research--query-results nil)
-;; TODO: Store the current search result in an alist so that we can navigate to next occurrence.
-;; That list should be lazily evaluated the true pos when open the buffer.
 
 (aio-defun research--query-1 (collections query page &optional max-result)
   ""
@@ -1011,7 +1011,8 @@ It's a plist of (:result research--code-result :idx).")
                                   (repositoryName . ,repo)
                                   (branchName . ,content-id)
                                   (filePath . ,path))
-                         :host (format "almsearch.dev.azure.com/%s" org)
+                         :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
+                         :auth-url (format "https://dev.azure.com/%s" (research--encode-url org))
                          :forge 'azdev))
              (plist-get :value)))))))
 
@@ -1024,6 +1025,7 @@ It's a plist of (:result research--code-result :idx).")
                                          (research--encode-url repo)
                                          (research--encode-url id))
                            :host "api.github.com"
+                           :auth-url "https://github.com"
                            :forge 'github))
         (plist-get :content)
         (base64-decode-string)))))
