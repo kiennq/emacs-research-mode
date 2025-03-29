@@ -477,8 +477,8 @@ into query list target."
   (research--save research-cols-file
                   (setq research--collections
                         (let ((cols (or research--collections (make-hash-table :test #'equal))))
-                          (-> (aio-await (research--get-collections recipe))
-                              (mapc (lambda (col) (puthash (research--repo-id col) col cols))))
+                          (->> (aio-await (research--get-collections recipe))
+                               (mapc (lambda (col) (puthash (research--repo-id col) col cols))))
                           cols))))
 
 (cl-defgeneric research--add-repo (type)
