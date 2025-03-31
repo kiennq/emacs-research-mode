@@ -126,39 +126,9 @@
 ;;           (url-recreate-url urlobj)))
 ;;     (_ url)))
 
-(cl-defmethod ghub--auth (host (_auth (eql 'cookie)) _user _forge)
-  "Authentication header with HOST using cookie."
-  (when-let* ((pred1 url-setup-done)
-              (default-exp "12/31/2099")
-              (url (or (get-text-property 0 'url host)
-                       (format "https://%s" host)))
-              (urlobj (url-generic-parse-url url))
-              (host (url-host urlobj))
-              (domain (url-domain urlobj))
-              (path (let ((raw-path (car (url-path-and-query urlobj))))
-                      (if (> (length raw-path) 0) raw-path "/")))
-              (pred2 (not (url-cookie-retrieve domain path 'secure))))
-    (read-from-minibuffer
-     (format "The current cookies need refresh. Press ENTER to open %s for verification." url))
-    (browse-url url)
-    (let* ((ghub-json-object-type 'plist)
-           (ghub-json-array-type 'array)
-           (ghub-json-null-object nil)
-           (ghub-json-false-object nil))
-      (->> (ghub--json-parse-string
-            (read-from-minibuffer
-             "Login and enter the json cookies (via Cookie-Editor) from the opened website: "))
-           (mapc (-lambda ((&plist :name :value :expirationDate :domain :path :secure))
-                   (url-cookie-store name value
-                                     (pcase expirationDate
-                                       ((pred numberp)
-                                        (format-time-string "%FT%T%z" (seconds-to-time expirationDate)))
-                                       (_ (format "%s" expirationDate)))
-                                     domain path secure)))))
-    ;; Mark the host cookies have been imported
-    (url-cookie-store "__imported_" "1" default-exp domain path 'secure)
-    (setq url-cookies-changed-since-last-save t)
-    (url-cookie-write-file))
+(cl-defmethod ghub--auth (host (auth (eql 'cookie)) _user forge)
+  "Authentication header with HOST using cookie (AUTH) on FORGE."
+  (research--authenticate host auth forge nil)
   '("Authorization" . ""))
 
 (cl-defun research--comp-read (prompt collection
@@ -220,22 +190,53 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
     (write-region (prin1-to-string obj) nil file nil :silent)
     obj))
 
-(cl-defgeneric research--clear-auth (_host _auth _forge)
-  "Try to re-authenticate for HOST with AUTH method of FORGE.
+(cl-defgeneric research--authenticate (_host _auth _forge _force)
+  "Try to authenticate for HOST with AUTH method on FORGE.
 Return non-nil on success."
   nil)
 
-(cl-defmethod research--clear-auth (host (_auth (eql 'cookie)) _forge)
-  "Try to re-authenticate via cookie for HOST of FORGE."
-  (when-let* ((url (format "https://%s" host))
+(cl-defmethod research--authenticate (host (_auth (eql 'cookie)) _forge force)
+  "Try to re-authenticate via cookie for HOST of FORGE.
+FORCE when non-nil."
+  (when-let* ((pred1 url-setup-done)
+              (default-exp "12/31/2099")
+              (url (or (get-text-property 0 'url host)
+                       (format "https://%s" host)))
               (urlobj (url-generic-parse-url url))
               (host (url-host urlobj))
+              (domain (url-domain urlobj))
               (path (let ((raw-path (car (url-path-and-query urlobj))))
                       (if (> (length raw-path) 0) raw-path "/")))
-              (domain (url-domain urlobj))
-              (has-domain? (url-cookie-retrieve domain path 'secure)))
-    (url-cookie-delete-cookies domain)
-    t))
+              (pred2 (or force (not (url-cookie-retrieve domain path 'secure)))))
+    (when force (url-cookie-delete-cookies domain))
+    ;; This introduces a suspension point where async call got suspended
+    (read-from-minibuffer
+     (format "The %s might need to be openned for verification. Press ENTER to continue." url))
+    ;; Resumed from async call so we need to double check
+    (unless (url-cookie-retrieve domain path 'secure)
+      (browse-url url)
+      (let* ((ghub-json-object-type 'plist)
+             (ghub-json-array-type 'array)
+             (ghub-json-null-object nil)
+             (ghub-json-false-object nil))
+        (->> (ghub--json-parse-string
+              (read-from-minibuffer
+               "Login and enter the json cookies (via Cookie-Editor) from the opened website: "))
+             (mapc (-lambda ((&plist :name :value :expirationDate :domain :path :secure))
+                     (url-cookie-store name value
+                                       (pcase expirationDate
+                                         ((pred numberp)
+                                          (format-time-string "%FT%T%z" (seconds-to-time expirationDate)))
+                                         (_ (format "%s" expirationDate)))
+                                       domain path secure)))))
+      ;; Mark the host cookies have been imported
+      (url-cookie-store "__imported_" "1" default-exp domain path 'secure)
+      (setq url-cookies-changed-since-last-save t)
+      (url-cookie-write-file)))
+  t)
+
+(defvar research--auth-cleared-hosts nil
+  "List of authentication cleared hosts.")
 
 (cl-defun research--request (method resource
                                     &key query payload headers reader auth auth-url host forge)
@@ -245,17 +246,19 @@ Return non-nil on success."
         (ghub-json-array-type 'array)
         (ghub-json-null-object nil)
         (ghub-json-false-object nil)
-        (auth (or auth research-default-auth-method 'token)))
-    (when (> 0 (prefix-numeric-value current-prefix-arg))
-      (research--clear-auth host auth forge)
-      (setq current-prefix-arg nil))
+        (auth (or auth research-default-auth-method 'token))
+        (host (propertize host 'url auth-url)))
+    (when (and (> 0 (prefix-numeric-value current-prefix-arg))
+               (not (member host research--auth-cleared-hosts)))
+      (research--authenticate host auth forge t)
+      (add-to-list 'research--auth-cleared-hosts host))
     (ghub-request method resource nil
                   :query query
                   :payload payload
                   :headers headers
                   :reader reader
                   :auth auth
-                  :host (propertize host 'url auth-url)
+                  :host host
                   :forge forge
                   :callback (lambda (result &rest _) (aio-resolve promise (-const result)))
                   :errorback
@@ -272,7 +275,7 @@ Return non-nil on success."
                       (message "%s::%s" (propertize "Research" 'face 'error) err)
                       (pcase err-code
                         ((or 401 404 500)
-                         (if (research--clear-auth host auth forge)
+                         (if (research--authenticate host auth forge t)
                              (aio-with-async
                                (aio-resolve
                                 promise
@@ -435,38 +438,42 @@ from refreshed collections instead of cached one.
 - `\\[universal-argument] \\[research-set-collection]' will add new collection
 into query list target."
   (interactive "p")
-  (aio-with-async
-    (let* ((force (equal option 16))
-           (add-new (equal option 4))
-           (collections (or (and (not force) research--collections)
-                            (setq research--collections
-                                  (research--save
-                                   research-cols-file
-                                   (let ((cols (make-hash-table :test #'equal)))
-                                     (mapc (lambda (col) (puthash (research--repo-id col) col cols))
-                                           (let ((repos (mapcar
-                                                         (aio-lambda (rcp)
-                                                           (aio-await (research--get-collections rcp)))
-                                                         research--rcps)))
-                                             (aio-await (aio-all repos))
-                                             (apply #'nconc (mapcar #'aio-wait-for repos))))
-                                     cols))))))
-      (setq research--inuse-collections
-            (append
-             (when add-new research--inuse-collections)
-             `(,(research--comp-read
-                 (format "%s Collection [%s]: "
-                         (cond (add-new "Add")
-                               (t ""))
-                         (mapcar #'research--repo-id research--inuse-collections))
-                 (if (vectorp collections) (append collections nil) collections)
-                 :require-match t
-                 :initial-input
-                 (when (not research--collections)
-                   (ignore-errors
-                     (aio-await (research--exec "SourceControl.Git.ShellAdapter" "GetOfficialBranch"))))))))
-      (unless add-new (setq research--extra-inuse-collections research--inuse-collections))
-      research--inuse-collections)))
+  (setq research--auth-cleared-hosts nil)
+  (research--set-collection option))
+
+(aio-defun research--set-collection (&optional option)
+  ""
+  (let* ((force (equal option 16))
+         (add-new (equal option 4))
+         (collections (or (and (not force) research--collections)
+                          (setq research--collections
+                                (research--save
+                                 research-cols-file
+                                 (let ((cols (make-hash-table :test #'equal)))
+                                   (mapc (lambda (col) (puthash (research--repo-id col) col cols))
+                                         (let ((repos (mapcar
+                                                       (aio-lambda (rcp)
+                                                         (aio-await (research--get-collections rcp)))
+                                                       research--rcps)))
+                                           (aio-await (aio-all repos))
+                                           (apply #'nconc (mapcar #'aio-wait-for repos))))
+                                   cols))))))
+    (setq research--inuse-collections
+          (append
+           (when add-new research--inuse-collections)
+           `(,(research--comp-read
+               (format "%s Collection [%s]: "
+                       (cond (add-new "Add")
+                             (t ""))
+                       (mapcar #'research--repo-id research--inuse-collections))
+               (if (vectorp collections) (append collections nil) collections)
+               :require-match t
+               :initial-input
+               (when (not research--collections)
+                 (ignore-errors
+                   (aio-await (research--exec "SourceControl.Git.ShellAdapter" "GetOfficialBranch"))))))))
+    (unless add-new (setq research--extra-inuse-collections research--inuse-collections))
+    research--inuse-collections))
 
 (defvar research--repo-orgs nil)
 
@@ -530,6 +537,7 @@ into query list target."
   (interactive (list (research--comp-read "Type: " `(("Azure DevOps"    . azdev)
                                                      ("GitHub"          . github))
                                           :require-match t)))
+  (setq research--auth-cleared-hosts nil)
   (research--add-repo type))
 
 ;;;###autoload
@@ -740,6 +748,7 @@ The PAGE can be input using prefix arg, negative value will force
 re-authentication.  The HINT will be used when there's no query specified."
   (interactive)
   (aio-with-async
+    (setq research--auth-cleared-hosts nil)
     (-let* ((prefix-val (prefix-numeric-value current-prefix-arg))
             (query (cond
                     (query (let ((query (concat prefix query)))
@@ -751,7 +760,7 @@ re-authentication.  The HINT will be used when there's no query specified."
                                                                    (or hint (thing-at-point 'symbol)))
                                             :history 'research--query-history))))
             (cols (or research--inuse-collections
-                      (aio-await (research-set-collection))))
+                      (aio-await (research--set-collection))))
             (page (or page prefix-val))
             (results (aio-await (research--query-1 cols query page))))
       (aio-await (research--show-query-result results #'research--jump-to-result)))))
@@ -1097,8 +1106,10 @@ prefixes are mapped differently from the repo root."
                               research--extra-inuse-collections)
                       :require-match t)
                      (read-from-minibuffer "Path prefix: ")))
-  (aio-with-async (aio-await (research--get-project-root (research--repo-id repo)
-                                                         path-prefix current-prefix-arg))))
+  (aio-with-async
+    (setq research--auth-cleared-hosts nil)
+    (aio-await (research--get-project-root (research--repo-id repo)
+                                           path-prefix current-prefix-arg))))
 
 (aio-defun research--convert-to-local-path (path repo-id)
   "Convert PATH to local path for REPO."
