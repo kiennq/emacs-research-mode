@@ -200,8 +200,7 @@ Return non-nil on success."
 FORCE when non-nil."
   (when-let* ((pred1 url-setup-done)
               (default-exp "12/31/2099")
-              (url (or (get-text-property 0 'url host)
-                       (format "https://%s" host)))
+              (url (format "https://%s" (or (get-text-property 0 'auth host) host)))
               (urlobj (url-generic-parse-url url))
               (host (url-host urlobj))
               (domain (url-domain urlobj))
@@ -235,11 +234,11 @@ FORCE when non-nil."
       (url-cookie-write-file)))
   t)
 
-(defvar research--auth-cleared-hosts nil
-  "List of authentication cleared hosts.")
+(defvar research--cleared-auth-hosts nil
+  "List of hosts that have authentication info cleared.")
 
 (cl-defun research--request (method resource
-                                    &key query payload headers reader auth auth-url host forge)
+                                    &key query payload headers reader auth auth-host host forge)
   "Wrapper of `ghub-request' in async form."
   (let ((promise (aio-promise))
         (ghub-json-object-type 'plist)
@@ -247,11 +246,12 @@ FORCE when non-nil."
         (ghub-json-null-object nil)
         (ghub-json-false-object nil)
         (auth (or auth research-default-auth-method 'token))
-        (host (propertize host 'url auth-url)))
+        (host (propertize host 'auth auth-host))
+        (auth-host (or auth-host host)))
     (when (and (> 0 (prefix-numeric-value current-prefix-arg))
-               (not (member host research--auth-cleared-hosts)))
-      (research--authenticate host auth forge t)
-      (add-to-list 'research--auth-cleared-hosts host))
+               (not (member auth-host research--cleared-auth-hosts)))
+      (research--authenticate auth-host auth forge t)
+      (add-to-list 'research--cleared-auth-hosts auth-host))
     (ghub-request method resource nil
                   :query query
                   :payload payload
@@ -376,7 +376,7 @@ FORCE when non-nil."
                                                    (research--encode-url project)
                                                    (research--encode-url repo))
                                      :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
-                                     :auth-url (format "https://dev.azure.com/%s" (research--encode-url org))
+                                     :auth-host (format "dev.azure.com/%s" (research--encode-url org))
                                      :forge 'azdev)))
             ((&plist :indexedBranches indexed-branches) col))
       (nconc
@@ -404,7 +404,7 @@ FORCE when non-nil."
                                      :headers '(("Accept" . "application/vnd.github.v3+json"))
                                      :query `((q . ,(format "repo:%s/%s fork:true" org repo)))
                                      :host "api.github.com"
-                                     :auth-url "https://github.com"
+                                     :auth-host "github.com"
                                      :forge 'github)))
             ((&plist :items) col))
       (unless (seq-empty-p items)
@@ -438,7 +438,7 @@ from refreshed collections instead of cached one.
 - `\\[universal-argument] \\[research-set-collection]' will add new collection
 into query list target."
   (interactive "p")
-  (setq research--auth-cleared-hosts nil)
+  (setq research--cleared-auth-hosts nil)
   (research--set-collection option))
 
 (aio-defun research--set-collection (&optional option)
@@ -524,7 +524,7 @@ into query list target."
                                                    (per_page . 100))
                                           :headers '(("Accept" . "application/vnd.github.v3+json"))
                                           :host "api.github.com"
-                                          :auth-url "https://github.com"))
+                                          :auth-host "github.com"))
                               (plist-get :items))))))
     (aio-await (research--add-recipe
                 (make-research--gh-rcp :org org :repo repo))))))
@@ -535,7 +535,7 @@ into query list target."
   (interactive (list (research--comp-read "Type: " `(("Azure DevOps"    . azdev)
                                                      ("GitHub"          . github))
                                           :require-match t)))
-  (setq research--auth-cleared-hosts nil)
+  (setq research--cleared-auth-hosts nil)
   (research--add-repo type))
 
 ;;;###autoload
@@ -631,7 +631,7 @@ Return at most MAX-RESULT items.")
                                                     (when rcp-repo `(:repository [,rcp-repo]))
                                                     (when branch `(:branch [,branch]))))
                              :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
-                             :auth-url (format "https://dev.azure.com/%s" (research--encode-url org))
+                             :auth-host (format "dev.azure.com/%s" (research--encode-url org))
                              :forge 'azdev)))
             ((&plist :results :infoCode info) res)
             (files (mapcar (-lambda ((&plist :path
@@ -746,7 +746,7 @@ The PAGE can be input using prefix arg, negative value will force
 re-authentication.  The HINT will be used when there's no query specified."
   (interactive)
   (aio-with-async
-    (setq research--auth-cleared-hosts nil)
+    (setq research--cleared-auth-hosts nil)
     (-let* ((prefix-val (prefix-numeric-value current-prefix-arg))
             (query (cond
                     (query (let ((query (concat prefix query)))
@@ -1019,7 +1019,7 @@ It's a plist of (:result research--code-result :idx).")
                                   (branchName . ,content-id)
                                   (filePath . ,path))
                          :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
-                         :auth-url (format "https://dev.azure.com/%s" (research--encode-url org))
+                         :auth-host (format "dev.azure.com/%s" (research--encode-url org))
                          :forge 'azdev))
              (plist-get :value)))))))
 
@@ -1032,7 +1032,7 @@ It's a plist of (:result research--code-result :idx).")
                                          (research--encode-url repo)
                                          (research--encode-url id))
                            :host "api.github.com"
-                           :auth-url "https://github.com"
+                           :auth-host "github.com"
                            :forge 'github))
         (plist-get :content)
         (base64-decode-string)))))
@@ -1105,7 +1105,7 @@ prefixes are mapped differently from the repo root."
                       :require-match t)
                      (read-from-minibuffer "Path prefix: ")))
   (aio-with-async
-    (setq research--auth-cleared-hosts nil)
+    (setq research--cleared-auth-hosts nil)
     (aio-await (research--get-project-root (research--repo-id repo)
                                            path-prefix current-prefix-arg))))
 
