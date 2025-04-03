@@ -451,10 +451,8 @@ into query list target."
                                  research-cols-file
                                  (let ((cols (make-hash-table :test #'equal)))
                                    (mapc (lambda (col) (puthash (research--repo-id col) col cols))
-                                         (let ((repos (mapcar
-                                                       (aio-lambda (rcp)
-                                                         (aio-await (research--get-collections rcp)))
-                                                       research--rcps)))
+                                         (let ((repos (mapcar #'research--get-collections
+                                                              research--rcps)))
                                            (aio-await (aio-all repos))
                                            (apply #'nconc (mapcar #'aio-wait-for repos))))
                                    cols))))))
@@ -769,13 +767,13 @@ re-authentication.  The HINT will be used when there's no query specified."
 
 (aio-defun research--query-1 (collections query page &optional max-result)
   ""
-  (let ((files (mapcar (aio-lambda (col)
-                         (aio-await (research--query col query page
-                                                     (or max-result 200))))
-                       collections)))
-    (aio-await (aio-all files))
+  (let ((results (mapcar (lambda (col)
+                           (research--query col query page
+                                            (or max-result 200)))
+                         collections)))
+    (aio-await (aio-all results))
     (setq research--query-results
-          (apply #'nconc (mapcar #'aio-wait-for files)))))
+          (apply #'nconc (mapcar #'aio-wait-for results)))))
 
 (defun research--show-info (info)
   "Show INFO."
