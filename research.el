@@ -455,21 +455,24 @@ into query list target."
                                                               research--rcps)))
                                            (aio-await (aio-all repos))
                                            (apply #'nconc (mapcar #'aio-wait-for repos))))
-                                   cols))))))
+                                   cols)))))
+         (new-col (research--comp-read
+                   (format "%s Collection [%s]: "
+                           (cond (add-new "Add")
+                                 (t ""))
+                           (mapcar #'research--repo-id research--inuse-collections))
+                   (if (vectorp collections) (append collections nil) collections)
+                   :require-match t
+                   :initial-input
+                   (when (not research--collections)
+                     (ignore-errors
+                       (aio-await (research--exec "SourceControl.Git.ShellAdapter" "GetOfficialBranch")))))))
     (setq research--inuse-collections
-          (append
-           (when add-new research--inuse-collections)
-           `(,(research--comp-read
-               (format "%s Collection [%s]: "
-                       (cond (add-new "Add")
-                             (t ""))
-                       (mapcar #'research--repo-id research--inuse-collections))
-               (if (vectorp collections) (append collections nil) collections)
-               :require-match t
-               :initial-input
-               (when (not research--collections)
-                 (ignore-errors
-                   (aio-await (research--exec "SourceControl.Git.ShellAdapter" "GetOfficialBranch"))))))))
+          (if add-new
+              (nconc research--inuse-collections
+                      (unless (member new-col research--inuse-collections)
+                        (list new-col)))
+            (list new-col)))
     (unless add-new (setq research--extra-inuse-collections research--inuse-collections))
     research--inuse-collections))
 
@@ -545,7 +548,7 @@ into query list target."
                                           (mapcar (lambda (rcp) `(,(research--rcp-id rcp) . ,rcp))
                                                   research--rcps)
                                           :require-match t)))
-  (delete repo research--rcps))
+  (setq research--rcps (delete repo research--rcps)))
 
 ;; retain query history for its own buffer
 (defvar research--query-history nil)
@@ -575,7 +578,8 @@ into query list target."
   (content-id nil)
   (type nil))
 
-(cl-defstruct (research--gh-code-result (:include research--code-result)))
+(cl-defstruct (research--gh-code-result (:include research--code-result))
+  (repo-id))
 
 (eval-and-compile
   (research-destruct research--code-result
@@ -652,8 +656,8 @@ Return at most MAX-RESULT items.")
                               :id change-id
                               :content-id content-id
                               :org org
-                              :project proj
-                              :repo repo
+                              :project (or rcp-proj proj)
+                              :repo (or rcp-repo repo)
                               :branch branch
                               :matches (mapcar (-rpartial #'plist-get :charOffset)
                                                (plist-get matches :content))
@@ -735,7 +739,8 @@ Return at most MAX-RESULT items.")
                                  (research--encode-url path))
                     :org org
                     :id blob_sha
-                    :repo repo_id
+                    :repo rcp-repo
+                    :repo-id repo_id
                     :matches (mapcar (-rpartial #'plist-get :start) term_matches)))
                  results)))))
 
@@ -944,8 +949,9 @@ It's a plist of (:result research--code-result :idx).")
       (setf (research--code-result-collection result) col)
       (puthash (research--repo-id col) col research--collections)
       (setq research--rcps (add-to-list 'research--rcps (research--repo-rcp col)))
-      (setq research--extra-inuse-collections
-            (cons col research--extra-inuse-collections))))
+      (unless (member col research--extra-inuse-collections)
+        (setq research--extra-inuse-collections
+              (cons col research--extra-inuse-collections)))))
   (-let* (((&research--code-result :path :url :matches
                                    :collection (&research--repo :id repo-id)) result)
           (pos (if (> (length matches) 0) (elt matches 0) 0))
@@ -1026,10 +1032,10 @@ It's a plist of (:result research--code-result :idx).")
 (cl-defmethod research--load-file ((file research--gh-code-result))
   ""
   (aio-with-async
-    (-let [(&research--gh-code-result :id :repo) file]
+    (-let [(&research--gh-code-result :id :repo-id) file]
       (-some-> (aio-await (research--request
                            "GET" (format "/repositories/%s/git/blobs/%s"
-                                         (research--encode-url repo)
+                                         (research--encode-url repo-id)
                                          (research--encode-url id))
                            :host "api.github.com"
                            :auth-host "github.com"
