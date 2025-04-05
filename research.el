@@ -198,8 +198,8 @@ Return non-nil on success."
 (cl-defmethod research--authenticate (host (_auth (eql 'cookie)) _forge force)
   "Try to re-authenticate via cookie for HOST of FORGE.
 FORCE when non-nil."
-  (when-let* ((pred1 url-setup-done)
-              (default-exp "12/31/2099")
+  (url-do-setup)
+  (when-let* ((default-exp "12/31/2099")
               (url (format "https://%s" (or (get-text-property 0 'auth host) host)))
               (urlobj (url-generic-parse-url url))
               (host (url-host urlobj))
