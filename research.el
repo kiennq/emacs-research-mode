@@ -171,15 +171,16 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
       (if popup? (pop-to-buffer (current-buffer))))))
 
 (defun research--restore (file)
-  "Restore saved objected from FILE."
+  "Restore saved object from FILE."
   (when (file-exists-p file)
-    (car (read-from-string
-          (let ((coding-system-for-read 'utf-8-auto-dos))
-            (with-temp-buffer
-              (set-buffer-multibyte nil)
-              (setq buffer-file-coding-system 'no-conversion)
-              (insert-file-contents file)
-              (buffer-substring-no-properties (point-min) (point-max))))))))
+    ;; We set the coding system to `utf-8-auto-dos' when reading so that
+    ;; files with CR EOL can still be read properly
+    (let ((coding-system-for-read 'utf-8-auto-dos))
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (insert-file-contents-literally file)
+        (goto-char (point-min))
+        (read (current-buffer))))))
 
 (defun research--save (file obj)
   "Save OBJ to FILE."
