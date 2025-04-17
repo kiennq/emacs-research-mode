@@ -158,7 +158,7 @@ PROMPT COLLECTION CATEGORY PREDICATE INITIAL-INPUT DEFAULT REQUIRE-MATCH."
                                   history default)))
     (or (pcase collection
           ((pred hash-table-p) (gethash result collection))
-          ((pred listp) (alist-get result collection)))
+          ((pred listp) (cdr (assoc result collection))))
         result)))
 
 (defsubst research--debug (msg &optional erase? popup?)
@@ -913,7 +913,7 @@ It's a plist of (:result research--code-result :idx).")
                                                 :require-match t)))
                    (funcall action re 'local)
                    re)))))
-    (aio-resolve promise (-const (alist-get result collection)))
+    (aio-resolve promise (-const (cdr (assoc result collection))))
     (aio-await promise)))
 
 (cl-defgeneric research--code-result-get-collection (result)
@@ -1087,20 +1087,44 @@ Optionally open ignore cache with FORCE."
       (aio-await (research--exec "git" "rev-parse" "--show-toplevel"))
     (error default-directory)))
 
-(aio-defun research--get-project-root (repo-id &optional path-prefix add?)
-  "Get project REPO-ID root for PATH-PREFIX path."
-  (let* ((git-toplevel (aio-await (research--get-git-toplevel)))
-         (root (read-directory-name
-                (format "root [%s]: " repo-id)
-                git-toplevel))
-         (path-prefix (or path-prefix "")))
-    (setf (alist-get repo-id research--roots nil nil 'equal)
-          (if (not add?) `((,path-prefix . ,root))
-            (cons `(,path-prefix . ,root) (alist-get repo-id research--roots nil nil #'equal))))))
+(cl-defun research--set-project-root (repo-id &key prefix root initial-prefix replace?)
+  ""
+  (aio-with-async
+    (let* ((prefix (directory-file-name (or prefix (read-from-minibuffer "Path prefix: " initial-prefix))))
+           (root (directory-file-name (or root (read-directory-name
+                                                (format "root [%s][%s]: " repo-id prefix)
+                                                (aio-await (research--get-git-toplevel))))))
+           (item (list (cons prefix root)))
+           (roots (cdr (assoc repo-id research--roots))))
+      (setf (alist-get repo-id research--roots nil nil #'equal)
+            (cond
+             (replace? item)
+             ((equal prefix "") (nconc roots item))
+             (t (nconc item roots))))
+      (car item))))
+
+(defun research--get-project-root (repo-id &optional path key-fn action-on-nil)
+  "Get project REPO-ID root for PATH.
+
+The return value is a cons of (prefix . root).
+The KEY-FN is used to extract the prefix to compare with PATH.
+ACTION-ON-NIL is used to dictate the behavior when no root is found.
+- `:default' will add the new root to the current list.
+- `:replace' will replace the current root with the new one.
+- `:stop' will return nil."
+  (let* ((roots (cdr (assoc repo-id research--roots)))
+         (key-fn (or key-fn #'car))
+         (action-on-nil (or action-on-nil :default))
+         (path (or path "")))
+    (or (--first (string-prefix-p (funcall key-fn it) path) roots)
+        (and (not (eq action-on-nil :stop))
+             (research--set-project-root repo-id
+                                         :initial-prefix path
+                                         :replace? (eq action-on-nil :replace))))))
 
 ;;;###autoload
-(defun research-set-project-root (repo &optional path-prefix)
-  "Set path for PATH-PREFIX of REPO.
+(defun research-set-project-root (repo)
+  "Set root for REPO.
 - \\[[universal-argument]] \\[research-set-project-root] will add path prefix instead.
 
 Path prefix is used to resolve the issue where the roots for some result's
@@ -1109,20 +1133,16 @@ prefixes are mapped differently from the repo root."
                       "Collection: "
                       (mapcar (lambda (col) `(,(research--repo-id col) . ,col))
                               research--extra-inuse-collections)
-                      :require-match t)
-                     (read-from-minibuffer "Path prefix: ")))
+                      :require-match t)))
   (aio-with-async
     (setq research--cleared-auth-hosts nil)
-    (aio-await (research--get-project-root (research--repo-id repo)
-                                           path-prefix current-prefix-arg))))
+    (aio-await (research--set-project-root (research--repo-id repo)
+                                           :replace? (not current-prefix-arg)))))
 
 (aio-defun research--convert-to-local-path (path repo-id)
   "Convert PATH to local path for REPO."
   (-let [(prefix . root)
-         (-first (-lambda ((prefix . _))
-                   (string-prefix-p prefix path))
-                 (or (alist-get repo-id research--roots nil nil #'equal)
-                     (aio-await (research--get-project-root repo-id))))]
+         (aio-await (research--get-project-root repo-id path))]
     (concat (directory-file-name root) "/" (substring path (length prefix)))))
 
 (aio-defun research--jump-to-pos (buffer raw-pos)
@@ -1185,16 +1205,14 @@ prefixes are mapped differently from the repo root."
          (research--buffer-position-url (format-mode-line "%l")))))
    (buffer-file-name
     (aio-with-async
-      (-let* ((path (-some->> research--roots
-                      (-map (-lambda ((repo-id . roots))
-                              (or roots
-                                  (aio-wait-for (research--get-project-root repo-id)))))
-                      (-flatten)
-                      (--first (string-prefix-p (cdr it) buffer-file-name))
-                      (funcall (-lambda ((prefix . root))
-                                 (concat prefix (substring buffer-file-name
-                                                           ;; Need `+1` for the final `/`
-                                                           (+ (length (directory-file-name root)) 1)))))))
+      (-let* (((prefix . root)
+               (let (path)
+                 (--each-while research--roots
+                     (not (setq path (aio-await (research--get-project-root
+                                                 (car it) buffer-file-name #'cdr :stop)))))
+                 path))
+              (path (and prefix root
+                         (concat prefix (substring buffer-file-name (length root)))))
               (query (if path (format "path:%s" path)
                        (format "file:%s" (file-name-nondirectory buffer-file-name))))
               (result (aio-await (research-query :query query :page 1))))
