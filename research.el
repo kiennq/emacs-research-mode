@@ -53,8 +53,15 @@
 (defcustom research-default-auth-method 'token
   "Default method for authentication."
   :group 'research
-  :type `(choice (const :tag "Use token for authentication." token)
-                 (const :tag "Use imported cookies for authenitcation." cookie)))
+  :type `(choice (const :tag "Use token for authentication" token)
+                 (const :tag "Use imported cookies for authenitcation" cookie)))
+
+(defcustom research-open-result-fallback-action 'remote
+  "Fallback action when the result is not available locally."
+  :group 'research
+  :type `(choice (const :tag "Open remote file" remote)
+                 (const :tag "Open remote ignoring cache" remote-fresh)
+                 (const :tag "Open in browser" web)))
 
 (defvar research-debug nil "Enable debug mode.")
 (defvar research--conn nil "ReSearchCLI jsonrpc connection.")
@@ -889,8 +896,8 @@ It's a plist of (:result research--code-result :idx).")
                               "Open local")
                              ("r" (lambda (re) (funcall ',action (cdr re) 'remote))
                               "Open remote file")
-                             ("f" (lambda (re) (funcall ',action (cdr re) 'remote-force))
-                              "Open remote force")
+                             ("f" (lambda (re) (funcall ',action (cdr re) 'remote-fresh))
+                              "Open remote ignoring cache")
                              ("b" (lambda (re) (funcall ',action (cdr re) 'web))
                               "Open in browser"))
                            :caller 'research-results))
@@ -902,7 +909,7 @@ It's a plist of (:result research--code-result :idx).")
                             :action (helm-make-actions
                                      "Open local" (lambda (re) (funcall action re 'local))
                                      "Open remote file" (lambda (re) (funcall action re 'remote))
-                                     "Open remote force" (lambda (re) (funcall action re 'remote-force))
+                                     "Open remote ignoring cache" (lambda (re) (funcall action re 'remote-fresh))
                                      "Open in browser" (lambda (re) (funcall action re 'web))))
                   :prompt (format "pattern [%s]: " (car research--query-history))
                   :buffer "*helm reSearch*"))
@@ -944,7 +951,7 @@ It's a plist of (:result research--code-result :idx).")
                                       :repo repo)))))
 
 (aio-defun research--jump-to-result (result &optional type)
-  "Jump to RESULT regarding to TYPE as `local', `remote', `remote-force' or `web'."
+  "Jump to RESULT regarding to TYPE as `local', `remote', `remote-fresh' or `web'."
   (unless (research--code-result-collection result)
     (let ((col (research--code-result-get-collection result)))
       (setf (research--code-result-collection result) col)
@@ -960,20 +967,21 @@ It's a plist of (:result research--code-result :idx).")
            (pcase type
              ('remote
               (aio-await (research--load-file-1 result)))
-             ('remote-force
-              (aio-await (research--load-file-1 result 'force)))
+             ('remote-fresh
+              (aio-await (research--load-file-1 result 'ignore-cache)))
              ('web (browse-url url))
              (_
               (let ((local-path (aio-await
                                  (research--convert-to-local-path path repo-id))))
                 (if (file-exists-p local-path)
-                    (progn
-                      (find-file-noselect local-path))
-                  (aio-await (research--load-file-1 result))))))))
+                    (find-file-noselect local-path)
+                  (aio-await (research--jump-to-result
+                              result research-open-result-fallback-action))))))))
     (when (or (bufferp buf) (stringp buf))
       (research--save-current-buffer-result buf result
                                             :pos pos)
-      (research--jump-to-pos buf pos))))
+      (research--jump-to-pos buf pos)))
+  nil)
 
 ;;;###autoload
 (defun research-next-in-buffer (step)
@@ -1044,9 +1052,9 @@ It's a plist of (:result research--code-result :idx).")
         (plist-get :content)
         (base64-decode-string)))))
 
-(aio-defun research--load-file-1 (file &optional force)
+(aio-defun research--load-file-1 (file &optional ignore-cache)
   "Load the remote FILE.
-Optionally open ignore cache with FORCE."
+Optionally open ignore cache with IGNORE-CACHE."
   (-let* (((&research--code-result :path :id
                                    :collection (&research--repo :id repo-id)) file)
           (file-name (string-join `(,temporary-file-directory
@@ -1058,7 +1066,7 @@ Optionally open ignore cache with FORCE."
                                       (let ((ext (file-name-extension path)))
                                         (if ext (concat "." ext) ""))))
                                   "/" )))
-    (if (and (file-exists-p file-name) (not force))
+    (if (and (file-exists-p file-name) (not ignore-cache))
         (find-file-noselect file-name)
       (when-let* ((file-content (aio-await (research--load-file file))))
         (make-directory (file-name-directory file-name) t)
