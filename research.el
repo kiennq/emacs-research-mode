@@ -6,7 +6,7 @@
 ;; Maintainer: Park Jiin; Kien Nguyen
 ;; Version: 3.1
 ;; Keywords: research, source
-;; Package-Requires: ((emacs "27.1") (aio "1.0") (dash "2.19.1") (ghub))
+;; Package-Requires: ((emacs "29.1") (aio "1.0") (dash "2.19.1") (ghub))
 
 ;; This file is NOT part of GNU Emacs.
 
@@ -221,20 +221,20 @@ FORCE when non-nil."
     ;; Resumed from async call so we need to double check
     (unless (url-cookie-retrieve domain path 'secure)
       (browse-url url)
-      (let* ((ghub-json-object-type 'plist)
-             (ghub-json-array-type 'array)
-             (ghub-json-null-object nil)
-             (ghub-json-false-object nil))
-        (->> (ghub--json-parse-string
-              (read-from-minibuffer
-               "Login and enter the json cookies (via Cookie-Editor) from the opened website: "))
-             (mapc (-lambda ((&plist :name :value :expirationDate :domain :path :secure))
-                     (url-cookie-store name value
-                                       (pcase expirationDate
-                                         ((pred numberp)
-                                          (format-time-string "%FT%T%z" (seconds-to-time expirationDate)))
-                                         (_ (format "%s" expirationDate)))
-                                       domain path secure)))))
+      (->> (json-parse-string
+            (read-from-minibuffer
+             "Login and enter the json cookies (via Cookie-Editor) from the opened website: ")
+            :object-type 'plist
+            :array-type 'array
+            :null-object nil
+            :false-object nil)
+           (mapc (-lambda ((&plist :name :value :expirationDate :domain :path :secure))
+                   (url-cookie-store name value
+                                     (pcase expirationDate
+                                       ((pred numberp)
+                                        (format-time-string "%FT%T%z" (seconds-to-time expirationDate)))
+                                       (_ (format "%s" expirationDate)))
+                                     domain path secure))))
       ;; Mark the host cookies have been imported
       (url-cookie-store "__imported_" "1" default-exp domain path 'secure)
       (setq url-cookies-changed-since-last-save t)
