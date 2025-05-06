@@ -263,7 +263,18 @@ FORCE when non-nil."
                   :query query
                   :payload payload
                   :headers headers
-                  :reader reader
+                  :reader (or reader
+                              (lambda (&rest _)
+                                (and-let* ((resp (ghub--decode-payload)))
+                                  (condition-case-unless-debug err
+                                      (json-parse-string resp
+                                                         :object-type 'plist
+                                                         :array-type 'array
+                                                         :null-object nil
+                                                         :false-object nil)
+                                    (json-parse-error
+                                     `((:error (:message ,(format "%s" err))
+                                               (:data ,resp))))))))
                   :auth auth
                   :host host
                   :forge forge
@@ -286,15 +297,14 @@ FORCE when non-nil."
                              (aio-with-async
                                (aio-resolve
                                 promise
-                                (-const (aio-await (research--request
-                                                    method resource
-                                                    :query query
-                                                    :payload payload
-                                                    :headers headers
-                                                    :reader reader
-                                                    :auth auth
-                                                    :host host
-                                                    :forge forge)))))
+                                (-const (aio-await (research--request method resource
+                                                                      :query query
+                                                                      :payload payload
+                                                                      :headers headers
+                                                                      :reader reader
+                                                                      :auth auth
+                                                                      :host host
+                                                                      :forge forge)))))
                            (aio-resolve promise (-const nil))))
                         (_ (aio-resolve promise (-const nil)))))))
     promise))
