@@ -1107,7 +1107,7 @@ Optionally open ignore cache with IGNORE-CACHE."
 (cl-defun research--set-project-root (repo-id &key prefix root initial-prefix replace?)
   ""
   (aio-with-async
-    (let* ((prefix (directory-file-name (or prefix (read-from-minibuffer "Path prefix: " initial-prefix))))
+    (let* ((prefix (directory-file-name (or prefix (research--comp-read "Path prefix: " `(,initial-prefix)))))
            (root (directory-file-name (or root (read-directory-name
                                                 (format "root [%s][%s]: " repo-id prefix)
                                                 (aio-await (research--get-git-toplevel))))))
