@@ -642,8 +642,8 @@ Return at most MAX-RESULT items.")
               :rcp (&research--az-rcp :org :project rcp-proj :repo rcp-repo))
              collection)
             (res (aio-await (research--request
-                             "POST" "/_apis/search/advancedCodeSearchResults"
-                             :query '((api-version . "6.0-preview.1"))
+                             "POST" "/_apis/search/codesearchresults"
+                             :query '((api-version . "7.2-preview.1"))
                              :payload `( :$top ,max-result
                                          :$skip ,(* (max 0 (1- page)) max-result)
                                          :searchText ,query
@@ -1026,7 +1026,7 @@ It's a plist of (:result research--code-result :idx).")
                      "GET" (format "/%s/_apis/git/repositories/%s/items"
                                    (research--encode-url project)
                                    (research--encode-url repo))
-                     :query `((api-version . "6.0-preview.1")
+                     :query `((api-version . "7.2-preview.1")
                               (versionType . "commit")
                               (version . ,id)
                               (scopePath . ,path))
