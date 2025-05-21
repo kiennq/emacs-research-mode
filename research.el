@@ -202,44 +202,6 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
 Return non-nil on success."
   nil)
 
-(cl-defmethod research--authenticate (host (_auth (eql 'cookie)) _forge force)
-  "Try to re-authenticate via cookie for HOST of FORGE.
-FORCE when non-nil."
-  (url-do-setup)
-  (when-let* ((default-exp "12/31/2099")
-              (url (format "https://%s" (or (get-text-property 0 'auth host) host)))
-              (urlobj (url-generic-parse-url url))
-              (host (url-host urlobj))
-              (domain (url-domain urlobj))
-              (path (let ((raw-path (car (url-path-and-query urlobj))))
-                      (if (> (length raw-path) 0) raw-path "/")))
-              (pred2 (or force (not (url-cookie-retrieve domain path 'secure)))))
-    (when force (url-cookie-delete-cookies domain))
-    ;; This introduces a suspension point where async call got suspended
-    (read-from-minibuffer
-     (format "The %s might need to be openned for verification. Press ENTER to continue." url))
-    ;; Resumed from async call so we need to double check
-    (unless (url-cookie-retrieve domain path 'secure)
-      (browse-url url)
-      (->> (json-parse-string
-            (read-from-minibuffer
-             "Login and enter the json cookies (via Cookie-Editor) from the opened website: ")
-            :object-type 'plist
-            :array-type 'array
-            :null-object nil
-            :false-object nil)
-           (mapc (-lambda ((&plist :name :value :expirationDate :domain :path :secure))
-                   (url-cookie-store name value
-                                     (pcase expirationDate
-                                       ((pred numberp)
-                                        (format-time-string "%FT%T%z" (seconds-to-time expirationDate)))
-                                       (_ (format "%s" expirationDate)))
-                                     domain path secure))))
-      ;; Mark the host cookies have been imported
-      (url-cookie-store "__imported_" "1" default-exp domain path 'secure)
-      (setq url-cookies-changed-since-last-save t)
-      (url-cookie-write-file)))
-  t)
 
 (defvar research--cleared-auth-hosts nil
   "List of hosts that have authentication info cleared.")
@@ -248,10 +210,6 @@ FORCE when non-nil."
                                     &key query payload headers reader auth auth-host host forge)
   "Wrapper of `ghub-request' in async form."
   (let ((promise (aio-promise))
-        (ghub-json-object-type 'plist)
-        (ghub-json-array-type 'array)
-        (ghub-json-null-object nil)
-        (ghub-json-false-object nil)
         (auth (or auth research-default-auth-method 'token))
         (host (propertize host 'auth auth-host))
         (auth-host (or auth-host host)))
@@ -336,41 +294,15 @@ FORCE when non-nil."
   (org)
   (repo))
 
-(cl-defstruct (research--az-rcp (:constructor make-research--az-rcp (&key org project repo &allow-other-keys))
-                                (:include research--rcp (id (substring-no-properties
-                                                             (format "AzDev/%s/%s/%s" org
-                                                                     (or project "_")
-                                                                     (or repo "_"))))))
-  (project))
-
-(cl-defstruct (research--gh-rcp (:constructor make-research--gh-rcp (&key org repo &allow-other-keys))
-                                (:include research--rcp (id (substring-no-properties
-                                                             (format "GitHub/%s/%s" org
-                                                                     (or repo "_")))))))
-
 (cl-defstruct research--repo
   "Base type for the repository that we search on."
   (id nil :documentation "Display name." :read-only t)
   ;; rcp can contain empty data, dont rely on it
   (rcp nil :read-only t))
 
-(cl-defstruct (research--az-repo
-               (:constructor make-research--az-repo (&key rcp branch &allow-other-keys))
-               (:include research--repo (id (substring-no-properties
-                                             (format "%s/%s" (research--rcp-id rcp) (or branch "_"))))))
-  (branch))
-
-(cl-defstruct (research--gh-repo
-               (:constructor make-research--gh-repo (&key rcp &allow-other-keys))
-               (:include research--repo (id (substring-no-properties (research--rcp-id rcp))))))
-
 (eval-and-compile
   (research-destruct research--rcp
-                     research--az-rcp
-                     research--gh-rcp
-                     research--repo
-                     research--az-repo
-                     research--gh-repo))
+                     research--repo))
 
 (defvar research--rcps nil
   "Repo's recipes.")
@@ -383,64 +315,6 @@ FORCE when non-nil."
 
 (cl-defgeneric research--get-collections (repo-rcp)
   "Get collections of REPO-RCP.")
-
-(cl-defmethod research--get-collections ((repo-rcp research--az-rcp))
-  ""
-  (aio-with-async
-    (-let* (((&research--az-rcp :org :project :repo) repo-rcp)
-            (col (aio-await
-                  (research--request "GET" (format "/%s/_apis/search/status/repositories/%s"
-                                                   (research--encode-url project)
-                                                   (research--encode-url repo))
-                                     :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
-                                     :auth-host (format "dev.azure.com/%s" (research--encode-url org))
-                                     :forge 'azdev)))
-            ((&plist :indexedBranches indexed-branches) col))
-      (nconc
-       `(,(let ((rcp (make-research--az-rcp :org org)))
-            (make-research--az-repo
-             :rcp rcp))
-         ,(let ((rcp (make-research--az-rcp :org org :project project)))
-            (make-research--az-repo
-             :rcp rcp)))
-       (when (> (length indexed-branches) 1)
-         `(,(make-research--az-repo
-             :rcp repo-rcp)))
-       (mapcar (-lambda ((&plist :name branch))
-                 (make-research--az-repo
-                  :rcp repo-rcp
-                  :branch branch))
-               indexed-branches)))))
-
-(cl-defmethod research--get-collections ((repo-rcp research--gh-rcp))
-  ""
-  (aio-with-async
-    (-let* (((&research--gh-rcp :org :repo) repo-rcp)
-            (col (aio-await
-                  (research--request "GET" "/search/repositories"
-                                     :headers '(("Accept" . "application/vnd.github.v3+json"))
-                                     :query `((q . ,(format "repo:%s/%s fork:true" org repo)))
-                                     :host "api.github.com"
-                                     :auth-host "github.com"
-                                     :forge 'github)))
-            ((&plist :items) col))
-      (unless (seq-empty-p items)
-        (list (make-research--gh-repo :rcp repo-rcp))))))
-
-;; (cl-defmethod research--get-collections ((repo-rcp research--gh-rcp))
-;;   (aio-with-async
-;;     (-when-let* (((&research--gh-rcp :org :repo) repo-rcp)
-;;                  (col (aio-await
-;;                        (research--request "GET" (format "/api/repos/%s/%s"
-;;                                                         (research--encode-url org)
-;;                                                         (research--encode-url repo))
-;;                                           :auth 'cookie
-;;                                           :host "cs.github.com"
-;;                                           :forge 'cs-github)))
-;;                  ((&plist :RepoID id) col))
-;;       (list
-;;        (make-research--gh-repo
-;;         :rcp repo-rcp)))))
 
 (defvar research--inuse-collections nil)
 (defvar research--extra-inuse-collections nil
@@ -509,46 +383,6 @@ into query list target."
 (cl-defgeneric research--add-repo (type)
   "Add a repository of type TYPE into search collections.")
 
-(cl-defmethod research--add-repo ((_type (eql 'azdev)))
-  (aio-with-async
-    (let* ((org (research--comp-read "Org: " nil :history 'research--repo-orgs))
-           (project (research--comp-read
-                     "Project: "
-                     (mapcar (-rpartial #'plist-get :name)
-                             (-> (aio-await (research--request
-                                             "GET" "/_apis/projects"
-                                             :host (format "dev.azure.com/%s" (research--encode-url org))
-                                             :forge 'azdev))
-                                 (plist-get :value)))))
-           (repo (research--comp-read
-                  "Repository: "
-                  (mapcar (-rpartial #'plist-get :name)
-                          (-> (aio-await (research--request
-                                          "GET" (format "/%s/_apis/git/repositories"
-                                                        (research--encode-url project))
-                                          :host (format "dev.azure.com/%s" (research--encode-url org))
-                                          :forge 'azdev))
-                              (plist-get :value))))))
-      (aio-await (research--add-recipe
-                  (make-research--az-rcp :org org :project project :repo repo))))))
-
-(cl-defmethod research--add-repo ((_type (eql 'github)))
-  (aio-with-async
-    (let* ((org (research--comp-read "Org: " nil :history 'research--repo-orgs))
-           (repo (research--comp-read
-                  "Repository: "
-                  (mapcar (-rpartial #'plist-get :name)
-                          (-> (aio-await (research--request
-                                          "GET" "/search/repositories"
-                                          :query `((q . ,(format "user:%s fork:true" org))
-                                                   (per_page . 100))
-                                          :headers '(("Accept" . "application/vnd.github.v3+json"))
-                                          :host "api.github.com"
-                                          :auth-host "github.com"))
-                              (plist-get :items))))))
-    (aio-await (research--add-recipe
-                (make-research--gh-rcp :org org :repo repo))))))
-
 ;;;###autoload
 (defun research-add-repo (type)
   "Add a repository of TYPE into search collections."
@@ -589,19 +423,8 @@ into query list target."
   (collection)
   (matches nil :type list :documentation "List of offsets"))
 
-(cl-defstruct (research--az-code-result (:include research--code-result))
-  (project)
-  (branch)
-  (content-id nil)
-  (type nil))
-
-(cl-defstruct (research--gh-code-result (:include research--code-result))
-  (repo-id))
-
 (eval-and-compile
-  (research-destruct research--code-result
-                     research--az-code-result
-                     research--gh-code-result))
+  (research-destruct research--code-result))
 
 (defun research--az-get-info (info)
   "Return info description of INFO code."
@@ -634,132 +457,12 @@ into query list target."
   "Query QUERY to repository REPO with page PAGE.
 Return at most MAX-RESULT items.")
 
-(cl-defmethod research--query ((collection research--az-repo) query page max-result)
-  ""
-  (aio-with-async
-    (-let* (((&research--az-repo
-              :branch
-              :rcp (&research--az-rcp :org :project rcp-proj :repo rcp-repo))
-             collection)
-            (res (aio-await (research--request
-                             "POST" "/_apis/search/codesearchresults"
-                             :query '((api-version . "7.2-preview.1"))
-                             :payload `( :$top ,max-result
-                                         :$skip ,(* (max 0 (1- page)) max-result)
-                                         :searchText ,query
-                                         :filters ,(append
-                                                    (when rcp-proj `(:project [,rcp-proj]))
-                                                    (when rcp-repo `(:repository [,rcp-repo]))
-                                                    (when branch `(:branch [,branch]))))
-                             :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
-                             :auth-host (format "dev.azure.com/%s" (research--encode-url org))
-                             :forge 'azdev)))
-            ((&plist :results :infoCode info) res)
-            (files (mapcar (-lambda ((&plist :path
-                                             :contentId content-id
-                                             :versions [(&plist :branchName branch
-                                                                :changeId change-id)]
-                                             :repository (&plist :name repo)
-                                             :project (&plist :name proj)
-                                             :matches :repository))
-                             (make-research--az-code-result
-                              :path path
-                              :url (format "https://dev.azure.com/%s/%s/_git/%s?path=%s&version=GB%s"
-                                           (research--encode-url org)
-                                           (research--encode-url proj)
-                                           (research--encode-url repo)
-                                           (research--encode-url path)
-                                           (research--encode-url branch))
-                              :id change-id
-                              :content-id content-id
-                              :org org
-                              :project (or rcp-proj proj)
-                              :repo (or rcp-repo repo)
-                              :branch branch
-                              :matches (mapcar (-rpartial #'plist-get :charOffset)
-                                               (plist-get matches :content))
-                              :type (plist-get repository :type)))
-                           results)))
-      (research--show-info info)
-      files)))
-
 (cl-defstruct (research--frag-pos)
   (fragment nil :type string)
   (offset nil :type number))
 
 (eval-and-compile
   (research-destruct research--frag-pos))
-
-;; (cl-defmethod research--query ((collection research--gh-repo) query page max-result)
-;;   (aio-with-async
-;;     (-let* (((&research--gh-repo
-;;               :id repo-id
-;;               :rcp (&research--gh-rcp :org :repo))
-;;              collection)
-;;             (res (aio-await (research--request
-;;                              "GET" "/search/code"
-;;                              :headers '(("Accept" . "application/vnd.github.v3.text-match+json"))
-;;                              :query `((q . ,(format "repo:%s/%s %s" org repo query))
-;;                                       (per_page . ,max-result)
-;;                                       (page . ,page))
-;;                              :host "api.github.com"
-;;                              :forge 'github)))
-;;             ((&plist :items) res))
-;;       (--remove (not it)
-;;                 (mapcar
-;;                  (-lambda ((&plist :path :sha :html_url url
-;;                                    :repository (&plist :id cur-id)
-;;                                    :text_matches matches))
-;;                    (when (equal repo-id cur-id)
-;;                      (make-research--gh-code-result
-;;                       :path path
-;;                       :url url
-;;                       :id sha
-;;                       :repo collection
-;;                       :matches (apply #'nconc
-;;                                       (mapcar (-lambda ((&plist :fragment :matches))
-;;                                                 (mapcar (-lambda ((&plist :indices [start _]))
-;;                                                           (make-research--frag-pos
-;;                                                            :fragment fragment
-;;                                                            :offset start))
-;;                                                         matches))
-;;                                               matches)))))
-;;                  items)))))
-
-(cl-defmethod research--query ((collection research--gh-repo) query page _max-result)
-  ""
-  (aio-with-async
-    (-let* (((&research--gh-repo
-              :rcp (&research--gh-rcp :org org :repo rcp-repo))
-             collection)
-            (url-mime-accept-string "application/json")
-            (res (aio-await (research--request
-                             "GET" "/search"
-                             :query `((q . ,(format "repo:%s/%s %s" org rcp-repo query))
-                                      (type . "code")
-                                      (p . ,page))
-                             :auth 'cookie
-                             :host "github.com"
-                             :forge 'cs-github)))
-            ((&plist :payload (&plist :results)) res))
-      (--remove (not it)
-                (mapcar
-                 (-lambda ((&plist :path :blob_sha :commit_sha
-                                   :repo_nwo
-                                   :repo_id
-                                   :term_matches))
-                   (make-research--gh-code-result
-                    :path path
-                    :url (format "https://github.com/%s/blob/%s/%s"
-                                 repo_nwo
-                                 (research--encode-url commit_sha)
-                                 (research--encode-url path))
-                    :org org
-                    :id blob_sha
-                    :repo rcp-repo
-                    :repo-id repo_id
-                    :matches (mapcar (-rpartial #'plist-get :start) term_matches)))
-                 results)))))
 
 ;;;###autoload
 (cl-defun research-query (&key query page prefix hint)
@@ -833,41 +536,6 @@ re-authentication.  The HINT will be used when there's no query specified."
                         (1 :crlf)
                         (_ :lf))))))))
 
-(cl-defmethod research--buf-pos ((pos number))
-  (let ((buf (current-buffer)))
-    (aio-with-async
-      (let ((eol (aio-await (research--file-index-eol buf))))
-        (with-current-buffer buf
-          (pcase eol
-            (:crlf (cl-labels ((bin-srch (pos beg end)
-                                 (if (> end beg)
-                                     (let* ((mid (/ (+ beg end) 2))
-                                            (cur-pos (+ mid (line-number-at-pos mid 'abs) -1)))
-                                       (cond
-                                        ((= cur-pos pos) mid)
-                                        ((< cur-pos pos) (bin-srch pos (1+ mid) end))
-                                        (t (bin-srch pos beg mid))))
-                                   beg)))
-                     (1+ (bin-srch pos (point-min) (min pos (point-max))))))
-            (:lf (1+ pos))))))))
-
-(cl-defmethod research--buf-pos ((pos research--frag-pos))
-  (-let* (((&research--frag-pos :fragment :offset) pos)
-          (r-count 0)
-          (offset (with-temp-buffer
-                    (set-buffer-multibyte nil)
-                    (setq buffer-file-coding-system 'no-conversion)
-                    (insert fragment)
-                    (save-match-data
-                      (goto-char (point-min))
-                      (while (search-forward "\r" offset 'bound)
-                        (cl-incf r-count)))
-                    (- offset r-count))))
-    (goto-char (point-min))
-    (search-forward (decode-coding-string fragment 'utf-8-auto-dos 'nocopy) nil 'noerror)
-    (when-let* ((m (match-beginning 0)))
-      (+ m offset))))
-
 (defvar-local research--current-buffer-result nil
   "Store reSearch result of current buffer.
 It's a plist of (:result research--code-result :idx).")
@@ -935,30 +603,6 @@ It's a plist of (:result research--code-result :idx).")
 (cl-defgeneric research--code-result-get-collection (result)
   "Get the collection (repo) from RESULT.")
 
-(cl-defmethod research--code-result-get-collection ((result research--az-code-result))
-  ""
-  (-let* (((&research--az-code-result :org :project :repo :branch) result))
-    (or (gethash (format "AzDev/%s/%s/%s/%s" org
-                         (or project "_")
-                         (or repo "_")
-                         (or branch "_"))
-                 research--collections)
-        (make-research--az-repo :rcp (make-research--az-rcp
-                                      :org org
-                                      :project project
-                                      :repo repo)
-                                :branch branch))))
-
-(cl-defmethod research--code-result-get-collection ((result research--gh-code-result))
-  ""
-  (-let* (((&research--gh-code-result :org :repo) result))
-    (or (gethash (format "GitHub/%s/%s" org
-                         (or repo "_"))
-                 research--collections)
-        (make-research--gh-repo :rcp (make-research--gh-rcp
-                                      :org org
-                                      :repo repo)))))
-
 (aio-defun research--jump-to-result (result &optional type)
   "Jump to RESULT regarding to TYPE as `local', `remote', `remote-fresh' or `web'."
   (unless (research--code-result-collection result)
@@ -969,6 +613,7 @@ It's a plist of (:result research--code-result :idx).")
       (unless (member col research--extra-inuse-collections)
         (setq research--extra-inuse-collections
               (cons col research--extra-inuse-collections)))))
+
   (-let* (((&research--code-result :path :url :matches
                                    :collection (&research--repo :id repo-id)) result)
           (pos (if (> (length matches) 0) (elt matches 0) 0))
@@ -1013,53 +658,6 @@ It's a plist of (:result research--code-result :idx).")
 
 (cl-defgeneric research--load-file (file)
   "Load the remote FILE.")
-
-(cl-defmethod research--load-file ((file research--az-code-result))
-  ""
-  (aio-with-async
-    (-let [(&research--az-code-result :type :id :content-id :path
-                                      :org :project :repo)
-           file]
-      (pcase type
-        ("git"
-         (aio-await (research--request
-                     "GET" (format "/%s/_apis/git/repositories/%s/items"
-                                   (research--encode-url project)
-                                   (research--encode-url repo))
-                     :query `((api-version . "7.2-preview.1")
-                              (versionType . "commit")
-                              (version . ,id)
-                              (scopePath . ,path))
-                     :reader (lambda (&rest _) (buffer-substring-no-properties
-                                                (point) (point-max)))
-                     :host (format "dev.azure.com/%s" (research--encode-url org))
-                     :forge 'azdev)))
-        ("custom"
-         (-> (aio-await (research--request
-                         "GET" "/_apis/search/customCode"
-                         :query `((api-version . "6.0-preview.1")
-                                  (projectName . ,project)
-                                  (repositoryName . ,repo)
-                                  (branchName . ,content-id)
-                                  (filePath . ,path))
-                         :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
-                         :auth-host (format "dev.azure.com/%s" (research--encode-url org))
-                         :forge 'azdev))
-             (plist-get :value)))))))
-
-(cl-defmethod research--load-file ((file research--gh-code-result))
-  ""
-  (aio-with-async
-    (-let [(&research--gh-code-result :id :repo-id) file]
-      (-some-> (aio-await (research--request
-                           "GET" (format "/repositories/%s/git/blobs/%s"
-                                         (research--encode-url repo-id)
-                                         (research--encode-url id))
-                           :host "api.github.com"
-                           :auth-host "github.com"
-                           :forge 'github))
-        (plist-get :content)
-        (base64-decode-string)))))
 
 (aio-defun research--load-file-1 (file &optional ignore-cache)
   "Load the remote FILE.
@@ -1198,19 +796,431 @@ prefixes are mapped differently from the repo root."
       (research-init)
     (research-exit)))
 
-;;; Utilities commands
 
+;;; Utilities
 (cl-defgeneric research--buffer-position-url (code-result line)
   "Return the current buffer file url with LINE information included.")
 
+;;; Impl
+(cl-defmethod research--authenticate (host (_auth (eql 'cookie)) _forge force)
+  "Try to re-authenticate via cookie for HOST of FORGE.
+FORCE when non-nil."
+  (url-do-setup)
+  (when-let* ((default-exp "12/31/2099")
+              (url (format "https://%s" (or (get-text-property 0 'auth host) host)))
+              (urlobj (url-generic-parse-url url))
+              (host (url-host urlobj))
+              (domain (url-domain urlobj))
+              (path (let ((raw-path (car (url-path-and-query urlobj))))
+                      (if (> (length raw-path) 0) raw-path "/")))
+              (pred2 (or force (not (url-cookie-retrieve domain path 'secure)))))
+    (when force (url-cookie-delete-cookies domain))
+    ;; This introduces a suspension point where async call got suspended
+    (read-from-minibuffer
+     (format "The %s might need to be openned for verification. Press ENTER to continue." url))
+    ;; Resumed from async call so we need to double check
+    (unless (url-cookie-retrieve domain path 'secure)
+      (browse-url url)
+      (->> (json-parse-string
+            (read-from-minibuffer
+             "Login and enter the json cookies (via Cookie-Editor) from the opened website: ")
+            :object-type 'plist
+            :array-type 'array
+            :null-object nil
+            :false-object nil)
+           (mapc (-lambda ((&plist :name :value :expirationDate :domain :path :secure))
+                   (url-cookie-store name value
+                                     (pcase expirationDate
+                                       ((pred numberp)
+                                        (format-time-string "%FT%T%z" (seconds-to-time expirationDate)))
+                                       (_ (format "%s" expirationDate)))
+                                     domain path secure))))
+      ;; Mark the host cookies have been imported
+      (url-cookie-store "__imported_" "1" default-exp domain path 'secure)
+      (setq url-cookies-changed-since-last-save t)
+      (url-cookie-write-file)))
+  t)
+
+(cl-defmethod research--buf-pos ((pos number))
+  (let ((buf (current-buffer)))
+    (aio-with-async
+      (let ((eol (aio-await (research--file-index-eol buf))))
+        (with-current-buffer buf
+          (pcase eol
+            (:crlf (cl-labels ((bin-srch (pos beg end)
+                                 (if (> end beg)
+                                     (let* ((mid (/ (+ beg end) 2))
+                                            (cur-pos (+ mid (line-number-at-pos mid 'abs) -1)))
+                                       (cond
+                                        ((= cur-pos pos) mid)
+                                        ((< cur-pos pos) (bin-srch pos (1+ mid) end))
+                                        (t (bin-srch pos beg mid))))
+                                   beg)))
+                     (1+ (bin-srch pos (point-min) (min pos (point-max))))))
+            (:lf (1+ pos))))))))
+
+(cl-defmethod research--buf-pos ((pos research--frag-pos))
+  (-let* (((&research--frag-pos :fragment :offset) pos)
+          (r-count 0)
+          (offset (with-temp-buffer
+                    (set-buffer-multibyte nil)
+                    (setq buffer-file-coding-system 'no-conversion)
+                    (insert fragment)
+                    (save-match-data
+                      (goto-char (point-min))
+                      (while (search-forward "\r" offset 'bound)
+                        (cl-incf r-count)))
+                    (- offset r-count))))
+    (goto-char (point-min))
+    (search-forward (decode-coding-string fragment 'utf-8-auto-dos 'nocopy) nil 'noerror)
+    (when-let* ((m (match-beginning 0)))
+      (+ m offset))))
+
+;;; AzDev
+(cl-defstruct (research--az-rcp (:constructor make-research--az-rcp (&key org project repo &allow-other-keys))
+                                (:include research--rcp (id (substring-no-properties
+                                                             (format "AzDev/%s/%s/%s" org
+                                                                     (or project "_")
+                                                                     (or repo "_"))))))
+  (project))
+
+(cl-defstruct (research--az-repo
+               (:constructor make-research--az-repo (&key rcp branch &allow-other-keys))
+               (:include research--repo (id (substring-no-properties
+                                             (format "%s/%s" (research--rcp-id rcp) (or branch "_"))))))
+  (branch))
+
+(cl-defstruct (research--az-code-result (:include research--code-result))
+  (project)
+  (branch)
+  (content-id nil)
+  (type nil))
+
+(eval-when-compile
+  (research-destruct research--az-rcp
+                     research--az-repo
+                     research--az-code-result))
+
+(cl-defmethod research--get-collections ((repo-rcp research--az-rcp))
+  ""
+  (aio-with-async
+    (-let* (((&research--az-rcp :org :project :repo) repo-rcp)
+            (col (aio-await
+                  (research--request "GET" (format "/%s/_apis/search/status/repositories/%s"
+                                                   (research--encode-url project)
+                                                   (research--encode-url repo))
+                                     :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
+                                     :auth-host (format "dev.azure.com/%s" (research--encode-url org))
+                                     :forge 'azdev)))
+            ((&plist :indexedBranches indexed-branches) col))
+      (nconc
+       `(,(make-research--az-repo
+           :rcp (make-research--az-rcp :org org))
+         ,(make-research--az-repo
+           :rcp (make-research--az-rcp :org org :project project)))
+       (when (> (length indexed-branches) 1)
+         `(,(make-research--az-repo
+             :rcp repo-rcp)))
+       (mapcar (-lambda ((&plist :name branch))
+                 (make-research--az-repo
+                  :rcp repo-rcp
+                  :branch branch))
+               indexed-branches)))))
+
+(cl-defmethod research--add-repo ((_type (eql 'azdev)))
+  (aio-with-async
+    (let* ((org (research--comp-read "Org: " nil :history 'research--repo-orgs))
+           (project (research--comp-read
+                     "Project: "
+                     (mapcar (-rpartial #'plist-get :name)
+                             (-> (aio-await (research--request
+                                             "GET" "/_apis/projects"
+                                             :host (format "dev.azure.com/%s" (research--encode-url org))
+                                             :forge 'azdev))
+                                 (plist-get :value)))))
+           (repo (research--comp-read
+                  "Repository: "
+                  (mapcar (-rpartial #'plist-get :name)
+                          (-> (aio-await (research--request
+                                          "GET" (format "/%s/_apis/git/repositories"
+                                                        (research--encode-url project))
+                                          :host (format "dev.azure.com/%s" (research--encode-url org))
+                                          :forge 'azdev))
+                              (plist-get :value))))))
+      (aio-await (research--add-recipe
+                  (make-research--az-rcp :org org :project project :repo repo))))))
+
+(cl-defmethod research--query ((collection research--az-repo) query page max-result)
+  ""
+  (aio-with-async
+    (-let* (((&research--az-repo
+              :branch
+              :rcp (&research--az-rcp :org :project rcp-proj :repo rcp-repo))
+             collection)
+            (res (aio-await (research--request
+                             "POST" "/_apis/search/codesearchresults"
+                             :query '((api-version . "7.2-preview.1"))
+                             :payload `( :$top ,max-result
+                                         :$skip ,(* (max 0 (1- page)) max-result)
+                                         :searchText ,query
+                                         :filters ,(append
+                                                    (when rcp-proj `(:project [,rcp-proj]))
+                                                    (when rcp-repo `(:repository [,rcp-repo]))
+                                                    (when branch `(:branch [,branch]))))
+                             :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
+                             :auth-host (format "dev.azure.com/%s" (research--encode-url org))
+                             :forge 'azdev)))
+            ((&plist :results :infoCode info) res)
+            (files (mapcar (-lambda ((&plist :path
+                                             :contentId content-id
+                                             :versions [(&plist :branchName branch
+                                                                :changeId change-id)]
+                                             :repository (&plist :name repo)
+                                             :project (&plist :name proj)
+                                             :matches :repository))
+                             (make-research--az-code-result
+                              :path path
+                              :url (format "https://dev.azure.com/%s/%s/_git/%s?path=%s&version=GB%s"
+                                           (research--encode-url org)
+                                           (research--encode-url proj)
+                                           (research--encode-url repo)
+                                           (research--encode-url path)
+                                           (research--encode-url branch))
+                              :id change-id
+                              :content-id content-id
+                              :org org
+                              :project proj
+                              :repo repo
+                              :branch branch
+                              :matches (mapcar (-rpartial #'plist-get :charOffset)
+                                               (plist-get matches :content))
+                              :type (plist-get repository :type)))
+                           results)))
+      (research--show-info info)
+      files)))
+
+(cl-defmethod research--code-result-get-collection ((result research--az-code-result))
+  ""
+  (-let* (((&research--az-code-result :org :project :repo :branch) result))
+    (or (gethash (format "AzDev/%s/%s/%s/%s" org
+                         (or project "_")
+                         (or repo "_")
+                         (or branch "_"))
+                 research--collections)
+        (make-research--az-repo :rcp (make-research--az-rcp
+                                      :org org
+                                      :project project
+                                      :repo repo)
+                                :branch branch))))
+
+(cl-defmethod research--load-file ((file research--az-code-result))
+  ""
+  (aio-with-async
+    (-let [(&research--az-code-result :type :id :content-id :path
+                                      :org :project :repo)
+           file]
+      (pcase type
+        ("git"
+         (aio-await (research--request
+                     "GET" (format "/%s/_apis/git/repositories/%s/items"
+                                   (research--encode-url project)
+                                   (research--encode-url repo))
+                     :query `((api-version . "7.2-preview.1")
+                              (versionType . "commit")
+                              (version . ,id)
+                              (scopePath . ,path))
+                     :reader (lambda (&rest _) (buffer-substring-no-properties
+                                                (point) (point-max)))
+                     :host (format "dev.azure.com/%s" (research--encode-url org))
+                     :forge 'azdev)))
+        ("custom"
+         (-> (aio-await (research--request
+                         "GET" "/_apis/search/customCode"
+                         :query `((api-version . "6.0-preview.1")
+                                  (projectName . ,project)
+                                  (repositoryName . ,repo)
+                                  (branchName . ,content-id)
+                                  (filePath . ,path))
+                         :host (format "almsearch.dev.azure.com/%s" (research--encode-url org))
+                         :auth-host (format "dev.azure.com/%s" (research--encode-url org))
+                         :forge 'azdev))
+             (plist-get :value)))))))
+
+
 (cl-defmethod research--buffer-position-url ((re research--az-code-result) line)
+  ""
   (format "%1$s&line=%2$s&lineEnd=%2$s&lineStartColumn=1&lineEndColumn=1"
           (research--code-result-url re)
           line))
 
+;;; Github
+(cl-defstruct (research--gh-rcp (:constructor make-research--gh-rcp (&key org repo &allow-other-keys))
+                                (:include research--rcp (id (substring-no-properties
+                                                             (format "GitHub/%s/%s" org
+                                                                     (or repo "_")))))))
+
+(cl-defstruct (research--gh-repo
+               (:constructor make-research--gh-repo (&key rcp &allow-other-keys))
+               (:include research--repo (id (substring-no-properties (research--rcp-id rcp))))))
+
+(cl-defstruct (research--gh-code-result (:include research--code-result))
+  (repo-id))
+
+(eval-when-compile
+  (research-destruct research--gh-rcp
+                     research--gh-repo
+                     research--gh-code-result))
+
+(cl-defmethod research--get-collections ((repo-rcp research--gh-rcp))
+  ""
+  (aio-with-async
+    (-let* (((&research--gh-rcp :org :repo) repo-rcp)
+            (col (aio-await
+                  (research--request "GET" "/search/repositories"
+                                     :headers '(("Accept" . "application/vnd.github.v3+json"))
+                                     :query `((q . ,(format "repo:%s/%s fork:true" org repo)))
+                                     :host "api.github.com"
+                                     :auth-host "github.com"
+                                     :forge 'github)))
+            ((&plist :items) col))
+      (unless (seq-empty-p items)
+        `(,(make-research--gh-repo
+            :rcp (make-research--gh-rcp :org org))
+          ,(make-research--gh-repo :rcp repo-rcp))))))
+
+;; (cl-defmethod research--get-collections ((repo-rcp research--gh-rcp))
+;;   (aio-with-async
+;;     (-when-let* (((&research--gh-rcp :org :repo) repo-rcp)
+;;                  (col (aio-await
+;;                        (research--request "GET" (format "/api/repos/%s/%s"
+;;                                                         (research--encode-url org)
+;;                                                         (research--encode-url repo))
+;;                                           :auth 'cookie
+;;                                           :host "cs.github.com"
+;;                                           :forge 'cs-github)))
+;;                  ((&plist :RepoID id) col))
+;;       (list
+;;        (make-research--gh-repo
+;;         :rcp repo-rcp)))))
+
+(cl-defmethod research--add-repo ((_type (eql 'github)))
+  (aio-with-async
+    (let* ((org (research--comp-read "Org: " nil :history 'research--repo-orgs))
+           (repo (research--comp-read
+                  "Repository: "
+                  (mapcar (-rpartial #'plist-get :name)
+                          (-> (aio-await (research--request
+                                          "GET" "/search/repositories"
+                                          :query `((q . ,(format "user:%s fork:true" org))
+                                                   (per_page . 100))
+                                          :headers '(("Accept" . "application/vnd.github.v3+json"))
+                                          :host "api.github.com"
+                                          :auth-host "github.com"))
+                              (plist-get :items))))))
+    (aio-await (research--add-recipe
+                (make-research--gh-rcp :org org :repo repo))))))
+
+;; (cl-defmethod research--query ((collection research--gh-repo) query page max-result)
+;;   (aio-with-async
+;;     (-let* (((&research--gh-repo
+;;               :id repo-id
+;;               :rcp (&research--gh-rcp :org :repo))
+;;              collection)
+;;             (res (aio-await (research--request
+;;                              "GET" "/search/code"
+;;                              :headers '(("Accept" . "application/vnd.github.v3.text-match+json"))
+;;                              :query `((q . ,(format "repo:%s/%s %s" org repo query))
+;;                                       (per_page . ,max-result)
+;;                                       (page . ,page))
+;;                              :host "api.github.com"
+;;                              :forge 'github)))
+;;             ((&plist :items) res))
+;;       (--remove (not it)
+;;                 (mapcar
+;;                  (-lambda ((&plist :path :sha :html_url url
+;;                                    :repository (&plist :id cur-id)
+;;                                    :text_matches matches))
+;;                    (when (equal repo-id cur-id)
+;;                      (make-research--gh-code-result
+;;                       :path path
+;;                       :url url
+;;                       :id sha
+;;                       :repo collection
+;;                       :matches (apply #'nconc
+;;                                       (mapcar (-lambda ((&plist :fragment :matches))
+;;                                                 (mapcar (-lambda ((&plist :indices [start _]))
+;;                                                           (make-research--frag-pos
+;;                                                            :fragment fragment
+;;                                                            :offset start))
+;;                                                         matches))
+;;                                               matches)))))
+;;                  items)))))
+
+(cl-defmethod research--query ((collection research--gh-repo) query page _max-result)
+  ""
+  (aio-with-async
+    (-let* (((&research--gh-repo
+              :rcp (&research--gh-rcp :org org :repo rcp-repo))
+             collection)
+            (url-mime-accept-string "application/json")
+            (res (aio-await (research--request
+                             "GET" "/search"
+                             :query `((q . ,(if rcp-repo
+                                                (format "repo:%s/%s %s" org rcp-repo query)
+                                              (format "org:%s %s" org query)))
+                                      (type . "code")
+                                      (p . ,page))
+                             :auth 'cookie
+                             :host "github.com"
+                             :forge 'cs-github)))
+            ((&plist :payload (&plist :results)) res))
+      (mapcar (-lambda ((&plist :path :blob_sha :commit_sha
+                                :repo_nwo
+                                :repo_id
+                                :term_matches))
+                (-let [(re-org repo) (split-string repo_nwo "/")]
+                  (make-research--gh-code-result
+                   :path path
+                   :url (format "https://github.com/%s/blob/%s/%s"
+                                repo_nwo
+                                (research--encode-url commit_sha)
+                                (research--encode-url path))
+                   :org re-org
+                   :id blob_sha
+                   :repo repo
+                   :repo-id repo_id
+                   :matches (mapcar (-rpartial #'plist-get :start) term_matches))))
+              results))))
+
+(cl-defmethod research--code-result-get-collection ((result research--gh-code-result))
+  ""
+  (-let* (((&research--gh-code-result :org :repo) result))
+    (or (gethash (format "GitHub/%s/%s" org
+                         (or repo "_"))
+                 research--collections)
+        (make-research--gh-repo :rcp (make-research--gh-rcp
+                                      :org org
+                                      :repo repo)))))
+
+(cl-defmethod research--load-file ((file research--gh-code-result))
+  ""
+  (aio-with-async
+    (-let [(&research--gh-code-result :id :repo-id) file]
+      (-some-> (aio-await (research--request
+                           "GET" (format "/repositories/%s/git/blobs/%s"
+                                         (research--encode-url repo-id)
+                                         (research--encode-url id))
+                           :host "api.github.com"
+                           :auth-host "github.com"
+                           :forge 'github))
+        (plist-get :content)
+        (base64-decode-string)))))
+
 (cl-defmethod research--buffer-position-url ((re research--gh-code-result) line)
+  ""
   (format "%s#L%s" (research--code-result-url re) line))
 
+;;; Utilities commands
 ;;;###autoload
 (defun research-open-buffer-url ()
   "Open buffer result url in browser or offer to open current file by reSearch."
