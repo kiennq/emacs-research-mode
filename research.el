@@ -531,10 +531,10 @@ re-authentication.  The HINT will be used when there's no query specified."
                        split-string
                        car)
                 ("crlf" :crlf)
-                ((pred stringp) :lf)
-                ('nil (pcase (coding-system-eol-type (buffer-local-value 'buffer-file-coding-system buf))
-                        (1 :crlf)
-                        (_ :lf))))))))
+                ("lf" :lf)
+                (_ (pcase (coding-system-eol-type (buffer-local-value 'buffer-file-coding-system buf))
+                     (1 :crlf)
+                     (_ :lf))))))))
 
 (defvar-local research--current-buffer-result nil
   "Store reSearch result of current buffer.
