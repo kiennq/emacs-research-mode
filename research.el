@@ -1049,9 +1049,10 @@ FORCE when non-nil."
 
 (cl-defmethod research--buffer-position-url ((re research--az-code-result) line)
   ""
-  (format "%1$s&line=%2$s&lineEnd=%2$s&lineStartColumn=1&lineEndColumn=1"
-          (research--code-result-url re)
-          line))
+  (let ((line (string-to-number line)))
+    (format "%s&line=%s&lineEnd=%s&lineStartColumn=1&lineEndColumn=1"
+            (research--code-result-url re)
+            line (1+ line))))
 
 ;;; Github
 (cl-defstruct (research--gh-rcp (:constructor make-research--gh-rcp (&key org repo &allow-other-keys))
