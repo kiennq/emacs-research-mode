@@ -66,7 +66,7 @@
 (defvar research-debug nil "Enable debug mode.")
 (defvar research--conn nil "ReSearchCLI jsonrpc connection.")
 
-(declare-function evil-set-command-property "ext:evil-common")
+(declare-function evil-set-jump "ext:evil-commands")
 
 (defmacro research-destruct (&rest structs)
   "Generate methods that allow to use STRUCTS in dash bindings."
@@ -408,10 +408,6 @@ into query list target."
   "Clear query history."
   (interactive)
   (setq research--query-history nil))
-
-(with-eval-after-load 'evil
-  (evil-set-command-property 'research-query :jump t)
-  (evil-set-command-property 'research-next-in-buffer :jump t))
 
 (cl-defstruct research--code-result
   "The code result"
@@ -762,6 +758,7 @@ prefixes are mapped differently from the repo root."
 
 (aio-defun research--jump-to-pos (buffer raw-pos)
   "In buffer BUFFER, jump to true position of RAW-POS."
+  (when (fboundp #'evil-set-jump) (evil-set-jump))
   (switch-to-buffer buffer)
   (let* ((raw-pos (if (stringp raw-pos) (string-to-number raw-pos) raw-pos))
          (pos (if (equal raw-pos 0) (point) (aio-await (research--buf-pos raw-pos)))))
