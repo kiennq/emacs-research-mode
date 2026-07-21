@@ -50,11 +50,12 @@
   :group 'research
   :type 'file)
 
-(defcustom research-default-auth-method 'token
-  "Default method for authentication."
+(defcustom research-default-auth-method 'azure-cli
+  "Default method for Azure DevOps authentication."
   :group 'research
-  :type `(choice (const :tag "Use token for authentication" token)
-                 (const :tag "Use imported cookies for authenitcation" cookie)))
+  :type `(choice
+          (const :tag "Use Azure CLI Entra authentication" azure-cli)
+          (const :tag "Use a personal access token" token)))
 
 (defcustom research-open-result-fallback-action 'remote
   "Fallback action when the result is not available locally."
@@ -65,6 +66,22 @@
 
 (defvar research-debug nil "Enable debug mode.")
 (defvar research--conn nil "ReSearchCLI jsonrpc connection.")
+
+(define-error 'research-auth-error "Research authentication failed")
+
+(defconst research--azure-cli-resource
+  "https://app.vssps.visualstudio.com/"
+  "Microsoft Entra resource URI for Azure DevOps.")
+
+(defvar research--azure-cli-token nil
+  "Cached Azure CLI token as (:access-token STRING :expires-at NUMBER).")
+
+(defun research--validate-auth-method (auth)
+  "Return supported authentication method AUTH."
+  (if (memq auth '(azure-cli token))
+      auth
+    (signal 'research-auth-error
+            `(,(format "Unsupported authentication method: %S" auth)))))
 
 (declare-function evil-set-jump "ext:evil-commands")
 
@@ -133,11 +150,6 @@
 ;;           (url-recreate-url urlobj)))
 ;;     (_ url)))
 
-(cl-defmethod ghub--auth (host (auth (eql 'cookie)) _user forge)
-  "Authentication header with HOST using cookie (AUTH) on FORGE."
-  (research--authenticate host auth forge nil)
-  '("Authorization" . ""))
-
 (cl-defun research--comp-read (prompt collection
                                       &key
                                       category
@@ -197,75 +209,132 @@ ERASE? will clear the log buffer, and POPUP? wil switch to it."
     (write-region (prin1-to-string obj) nil file nil :silent)
     obj))
 
-(cl-defgeneric research--authenticate (_host _auth _forge _force)
-  "Try to authenticate for HOST with AUTH method on FORGE.
-Return non-nil on success."
-  nil)
-
-
 (defvar research--cleared-auth-hosts nil
   "List of hosts that have authentication info cleared.")
 
-(cl-defun research--request (method resource
-                                    &key query payload headers reader auth auth-host host forge)
-  "Wrapper of `ghub-request' in async form."
-  (let ((promise (aio-promise))
-        (auth (or auth research-default-auth-method 'token))
-        (host (propertize host 'auth auth-host))
-        (auth-host (or auth-host host)))
-    (when (and (> 0 (prefix-numeric-value current-prefix-arg))
-               (not (member auth-host research--cleared-auth-hosts)))
-      (research--authenticate auth-host auth forge t)
-      (add-to-list 'research--cleared-auth-hosts auth-host))
-    (ghub-request method resource nil
-                  :query query
-                  :payload payload
-                  :headers headers
-                  :reader (or reader
-                              (lambda (&rest _)
-                                (and-let* ((resp (ghub--decode-payload)))
-                                  (condition-case-unless-debug err
-                                      (json-parse-string resp
-                                                         :object-type 'plist
-                                                         :array-type 'array
-                                                         :null-object nil
-                                                         :false-object nil)
-                                    (json-parse-error
-                                     `((:error (:message ,(format "%s" err))
-                                               (:data ,resp))))))))
-                  :auth auth
-                  :host host
-                  :forge forge
-                  :callback (lambda (result &rest _) (aio-resolve promise (-const result)))
-                  :errorback
-                  (lambda (err _header _status req &rest _)
-                    (let* ((err-type (cl-second err))
-                           (err-code (cl-third err))
-                           (err-detail (cl-fourth err))
-                           (err (if (eq err-type 'http)
-                                    (list 'http-error err-code
-                                          (nth 2 (assq err-code url-http-codes))
-                                          (when req (url-filename (ghub--req-url req)))
-                                          err-detail)
-                                  err)))
-                      (message "%s::%s" (propertize "Research" 'face 'error) err)
-                      (pcase err-code
-                        ((or 401 404 500)
-                         (if (research--authenticate host auth forge t)
-                             (aio-with-async
-                               (aio-resolve
-                                promise
-                                (-const (aio-await (research--request method resource
-                                                                      :query query
-                                                                      :payload payload
-                                                                      :headers headers
-                                                                      :reader reader
-                                                                      :auth auth
-                                                                      :host host
-                                                                      :forge forge)))))
-                           (aio-resolve promise (-const nil))))
-                        (_ (aio-resolve promise (-const nil)))))))
+(defun research--read-json-response (&rest _)
+  "Read and decode the current ghub response."
+  (and-let* ((response (ghub--decode-payload)))
+    (condition-case-unless-debug err
+        (json-parse-string response
+                           :object-type 'plist
+                           :array-type 'array
+                           :null-object nil
+                           :false-object nil)
+      (json-parse-error
+       `((:error (:message ,(format "%s" err))
+                 (:data ,response)))))))
+
+(defun research--resolve-request-success (promise result &rest _)
+  "Resolve PROMISE with successful ghub RESULT."
+  (aio-resolve promise (-const `(:value ,result))))
+
+(defun research--resolve-request-error (promise err _headers _status request &rest _)
+  "Resolve PROMISE with sanitized ghub ERR information."
+  (-let* (((_ err-type err-code) err)
+          (request-error
+           (if (eq err-type 'http)
+               `(http-error
+                 ,err-code
+                 ,(nth 2 (assq err-code url-http-codes))
+                 ,(when request
+                    (url-filename (ghub--req-url request))))
+             err)))
+    (aio-resolve
+     promise
+     (-const `(:error ,request-error :status ,err-code)))))
+
+(cl-defun research--request-once (method resource
+                                         &key query payload headers reader auth host forge)
+  "Make one asynchronous ghub request and return its promise."
+  (let ((promise (aio-promise)))
+    (ghub-request
+     method resource nil
+     :query query
+     :payload payload
+     :headers headers
+     :reader (or reader #'research--read-json-response)
+     :auth auth
+     :host host
+     :forge forge
+     :callback (-partial #'research--resolve-request-success promise)
+     :errorback (-partial #'research--resolve-request-error promise))
     promise))
+
+(cl-defun research--request (method resource
+                                    &key query payload headers reader auth auth-host host forge
+                                    (retry-auth t))
+  "Wrapper of `ghub-request' in async form."
+  (funcall
+   (aio-lambda ()
+    (let* ((auth (research--validate-auth-method
+                  (or auth
+                      (and (eq forge 'azdev)
+                           research-default-auth-method)
+                      'token)))
+           (auth-host (or auth-host host))
+           (host (propertize host 'auth auth-host))
+           (headers
+            (if (and (eq forge 'azdev)
+                     (not (assoc-string "X-TFS-FedAuthRedirect" headers t)))
+                `(("X-TFS-FedAuthRedirect" . "Suppress") ,@headers)
+              headers))
+           (force-auth
+            (and (> 0 (prefix-numeric-value current-prefix-arg))
+                 (not (member auth-host research--cleared-auth-hosts))))
+           (can-retry retry-auth)
+           done
+           result)
+      (when (and (eq auth 'azure-cli)
+                 (not (eq forge 'azdev)))
+        (signal
+         'research-auth-error
+         '("Azure CLI authentication is supported only for Azure DevOps.")))
+      (when force-auth
+        (add-to-list 'research--cleared-auth-hosts auth-host))
+      (while (not done)
+        (-let* (((request-auth request-headers)
+                 (if (eq auth 'token)
+                     `(token ,headers)
+                   `(none (("Authorization" .
+                            ,(format "Bearer %s"
+                                     (aio-await
+                                      (research--azure-cli-access-token force-auth))))
+                           ,@headers))))
+                ((&plist :value :error :status)
+                 (aio-await
+                  (research--request-once method resource
+                                          :query query
+                                          :payload payload
+                                          :headers request-headers
+                                          :reader reader
+                                          :auth request-auth
+                                          :host host
+                                          :forge forge))))
+          (when error
+            (message "%s::%s"
+                     (propertize "Research" 'face 'error)
+                     error))
+          (cond
+           ((not error)
+            (setq result value done t))
+           ((eq status 401)
+            (if can-retry (setq force-auth t can-retry nil)
+              (signal
+               'research-auth-error
+               `(,(if (eq auth 'azure-cli)
+                      (concat
+                       "Azure DevOps rejected the refreshed Azure CLI token. "
+                       "Run `az login` and verify that the selected account "
+                       "has access.")
+                    (format "%s" error))))))
+           ((and (eq forge 'azdev) (eq status 403))
+            (signal
+             'research-auth-error
+             '("Azure DevOps denied access (HTTP 403). Verify that the selected identity has permission to access this resource.")))
+           (t
+            (setq done t)))))
+      result))))
 
 (aio-defun research--exec (&rest command)
   "Asynchronously execute command COMMAND and return its output string."
@@ -281,6 +350,62 @@ Return non-nil on success."
                           (-const (when (> (length data) 0) (substring data 0 -1))))))
          (kill-buffer buf))))
     (aio-await promise)))
+
+(defun research--clear-azure-cli-token ()
+  "Clear the cached Azure CLI token."
+  (setq research--azure-cli-token nil))
+
+(aio-defun research--azure-cli-access-token (&optional force)
+  "Return an Azure DevOps Entra token acquired through Azure CLI.
+When FORCE is non-nil, ignore the cached token."
+  (unless (executable-find "az")
+    (signal 'research-auth-error
+            '("Azure CLI executable `az` is unavailable. Install Azure CLI and run `az login`.")))
+  (when force
+    (research--clear-azure-cli-token))
+  (-let* (((&plist :access-token cached-token :expires-at expires-at)
+           research--azure-cli-token))
+    (if (and cached-token expires-at
+             (> expires-at (+ (float-time) 300)))
+        cached-token
+      (let ((output
+             (aio-await
+              (research--exec
+               "az" "account" "get-access-token"
+               "--resource" research--azure-cli-resource
+               "--output" "json"))))
+        (unless (stringp output)
+          (signal 'research-auth-error
+                  '("Azure CLI did not return a token. Run `az login` and retry.")))
+        (-let* ((response
+                 (condition-case err
+                     (json-parse-string output
+                                        :object-type 'plist
+                                        :array-type 'array
+                                        :null-object nil
+                                        :false-object nil)
+                   (json-parse-error
+                    (signal
+                     'research-auth-error
+                     `(,(format
+                         "Azure CLI did not return a usable Azure DevOps token: %s. Run `az login` and retry."
+                         (error-message-string err)))))))
+                ((&plist :accessToken access-token
+                         :expires_on expires-at
+                         :expiresOn expires-on)
+                 response)
+                (expires-at
+                 (or expires-at
+                     (and expires-on
+                          (float-time (date-to-time expires-on))))))
+          (unless (and (stringp access-token)
+                       (> (length access-token) 0)
+                       (numberp expires-at))
+            (signal 'research-auth-error
+                    '("Azure CLI did not return a usable Azure DevOps token. Run `az login` and retry.")))
+          (setq research--azure-cli-token
+                `(:access-token ,access-token :expires-at ,expires-at))
+          access-token)))))
 
 (defsubst research--encode-url (url)
   "Call `url-encode-url' for URL."
@@ -772,6 +897,14 @@ prefixes are mapped differently from the repo root."
 (defun research-init ()
   "Init reSearch middleware process."
   (interactive)
+  (when (and (eq research-default-auth-method 'azure-cli)
+             (not (executable-find "az")))
+    (display-warning
+     'research
+     (concat
+      "Azure CLI executable `az` is unavailable. Install Azure CLI and run "
+      "`az login`, or configure `research-default-auth-method` as `token`.")
+     :warning))
   (research-exit)
   (setq research--rcps (or (research--restore research-recipes-file)
                            research--rcps))
@@ -799,45 +932,6 @@ prefixes are mapped differently from the repo root."
   "Return the current buffer file url with LINE information included.")
 
 ;;; Impl
-(cl-defmethod research--authenticate (host (_auth (eql 'cookie)) _forge force)
-  "Try to re-authenticate via cookie for HOST of FORGE.
-FORCE when non-nil."
-  (url-do-setup)
-  (when-let* ((default-exp "12/31/2099")
-              (url (format "https://%s" (or (get-text-property 0 'auth host) host)))
-              (urlobj (url-generic-parse-url url))
-              (host (url-host urlobj))
-              (domain (url-domain urlobj))
-              (path (let ((raw-path (car (url-path-and-query urlobj))))
-                      (if (> (length raw-path) 0) raw-path "/")))
-              (pred2 (or force (not (url-cookie-retrieve domain path 'secure)))))
-    (when force (url-cookie-delete-cookies domain))
-    ;; This introduces a suspension point where async call got suspended
-    (read-from-minibuffer
-     (format "The %s might need to be openned for verification. Press ENTER to continue." url))
-    ;; Resumed from async call so we need to double check
-    (unless (url-cookie-retrieve domain path 'secure)
-      (browse-url url)
-      (->> (json-parse-string
-            (read-from-minibuffer
-             "Login and enter the json cookies (via Cookie-Editor) from the opened website: ")
-            :object-type 'plist
-            :array-type 'array
-            :null-object nil
-            :false-object nil)
-           (mapc (-lambda ((&plist :name :value :expirationDate :domain :path :secure))
-                   (url-cookie-store name value
-                                     (pcase expirationDate
-                                       ((pred numberp)
-                                        (format-time-string "%FT%T%z" (seconds-to-time expirationDate)))
-                                       (_ (format "%s" expirationDate)))
-                                     domain path secure))))
-      ;; Mark the host cookies have been imported
-      (url-cookie-store "__imported_" "1" default-exp domain path 'secure)
-      (setq url-cookies-changed-since-last-save t)
-      (url-cookie-write-file)))
-  t)
-
 (cl-defmethod research--buf-pos ((pos number))
   (let ((buf (current-buffer)))
     (aio-with-async
@@ -956,7 +1050,7 @@ FORCE when non-nil."
              collection)
             (res (aio-await (research--request
                              "POST" "/_apis/search/codesearchresults"
-                             :query '((api-version . "7.2-preview.1"))
+                             :query '((api-version . "7.1"))
                              :payload `( :$top ,max-result
                                          :$skip ,(* (max 0 (1- page)) max-result)
                                          :searchText ,query
@@ -1022,7 +1116,7 @@ FORCE when non-nil."
                      "GET" (format "/%s/_apis/git/repositories/%s/items"
                                    (research--encode-url project)
                                    (research--encode-url repo))
-                     :query `((api-version . "7.2-preview.1")
+                     :query `((api-version . "7.1")
                               (versionType . "commit")
                               (version . ,id)
                               (scopePath . ,path))
@@ -1093,7 +1187,7 @@ FORCE when non-nil."
 ;;                        (research--request "GET" (format "/api/repos/%s/%s"
 ;;                                                         (research--encode-url org)
 ;;                                                         (research--encode-url repo))
-;;                                           :auth 'cookie
+;;                                           :auth 'token
 ;;                                           :host "cs.github.com"
 ;;                                           :forge 'cs-github)))
 ;;                  ((&plist :RepoID id) col))
@@ -1168,7 +1262,7 @@ FORCE when non-nil."
                                               (format "org:%s %s" org query)))
                                       (type . "code")
                                       (p . ,page))
-                             :auth 'cookie
+                             :auth 'token
                              :host "github.com"
                              :forge 'cs-github)))
             ((&plist :payload (&plist :results)) res))

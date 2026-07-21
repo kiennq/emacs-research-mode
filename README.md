@@ -18,14 +18,37 @@ Via [`Quelpa`](https://github.com/quelpa/quelpa)
                    :url "git@github.com:kiennq/emacs-research-mode.git"))
 ```
 
-## Using personal access token (PAT)
-You can use personal access tokens (PATs) to query the code search results.
-After obtaining your PATs, you can save them into the `~/.authinfo` file (or `~/.authinfo.gpg` as an encrypted file).
-The username should be set to:
-- `azdev^token` for `Azure DevOps`
-- `<account>^token` for other services
+## Azure DevOps authentication
 
-For example:
+Azure CLI authentication is the default:
+
+``` emacs-lisp
+(setq research-default-auth-method 'azure-cli)
+```
+
+Install Azure CLI and sign in using an identity that has access to the Azure DevOps organization:
+
+``` text
+az login
+```
+
+On a terminal-only machine:
+
+``` text
+az login --use-device-code
+```
+
+Headless machines may use Azure CLI service-principal or managed-identity login when that identity has Azure DevOps permissions. Each machine signs in independently; tokens are short-lived and are not copied between machines.
+
+### Using a personal access token
+
+Set:
+
+``` emacs-lisp
+(setq research-default-auth-method 'token)
+```
+
+Save PATs in `~/.authinfo` or `~/.authinfo.gpg`:
 
 ``` conf
 machine almsearch.dev.azure.com/<org> login azdev^token password <PAT>
@@ -33,16 +56,7 @@ machine dev.azure.com/<org> login azdev^token password <PAT>
 machine api.github.com login <account>^token password <PAT>
 ```
 
-Afterward, you can start exploring this plugin.
-
-## Using cookie
-If you prefer not to set up PATs, an alternative method is to authenticate via a browser and then transfer the cookie to Emacs.
-
-``` emacs-lisp
-(setq research-default-auth-method 'cookie)
-```
-
-The cookie from browswer can be obtained by using [Cookie-Editor](https://cookie-editor.com/).
+Only `azure-cli` and `token` are supported authentication methods. GitHub requests continue to use token authentication.
 
 # Sample setup
 
