@@ -4,7 +4,7 @@
 
 ;; Author: Park Jiin; Kien Nguyen
 ;; Maintainer: Park Jiin; Kien Nguyen
-;; Version: 3.1
+;; Version: 3.2
 ;; Keywords: research, source
 ;; Package-Requires: ((emacs "29.1") (aio "1.0") (dash "2.19.1") (ghub))
 
